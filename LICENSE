@@ -20,23 +20,11 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----------------------------------------------------------------------------
+---
 
-NOTE ON THIRD-PARTY ASSETS
+This license covers this project's own source code only
+(index.js, client.js, lib/, helper/, test/).
 
-The MIT license above covers this project's own source code
-(index.js, client.js, lib/, helper/).
-
-It does NOT cover the artwork and engine under assets/emotion-ball/.
-Those files come from the "Emotion Ball" project and remain under the
-"Emotion Ball Community License" (see assets/emotion-ball/LICENSE and
-assets/emotion-ball/NOTICE.md):
-
-  - the ball character's visual design (body, colors, ribbon FX) is for
-    personal study only — commercial use is prohibited and no commercial
-    license will ever be offered for it;
-  - the engine source and emotion configuration data are free for
-    non-commercial use; commercial licensing is separate.
-
-If you want to use this plugin commercially, replace assets/emotion-ball/
-with your own artwork (the renderer only needs ball.html + js/).
+The artwork and rendering engine under assets/emotion-ball/ are third-party
+work under a different license — see THIRD-PARTY.md and
+assets/emotion-ball/LICENSE.

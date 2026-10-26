@@ -16,8 +16,13 @@ DSH Host 进程（Node / 插件宿主半侧 index.js）
 │     → 推出 emotionId（31 接收 / 30 思考 / 32 忙碌 / 40 检索 / 36 联网 /
 │       33 完成 / 34 出错 / 35 等待 / 41 停止 / 38 拒绝 + 空闲轮换）
 ├── 静态服务 127.0.0.1:8766（ball.html、js、/state、/manual、/theme、/focus、
-│                            /badge、/emotions.json、/health）
+│                            /badge、/emotions.json、/health、/runtime/retry）
 └── apply() spawn helper ／ dispose() kill
+
+运行时（lib/runtime.js）
+└── 自备 Electron：首次启用下载 v43.3.0（npmmirror → GitHub 官方，sha256 校验，
+    tar.exe 解压）到 ~/.dsh/emotion-ball-runtime/。**不借用 dsh-pet**——
+    删掉 pet 球也不会报废。进度经 /state 暴露，DSH 右下角显示进度条，失败可重试。
 
 Electron helper（helper/main.js + preload.js）
 ├── 透明、无边框、置顶、skipTaskbar；内容比球大 4px（透明边缘），
@@ -25,7 +30,8 @@ Electron helper（helper/main.js + preload.js）
 ├── 载入 ball.html（同一份素材，不复制）
 ├── 命中检测：40ms 读光标，只在球/面板上解除 setIgnoreMouseEvents
 ├── 单击 → 展开面板（窗口 = 面板 + 8px + 球，自动决定朝上/朝下、靠左/靠右）
-├── 双击 → DSH 可见则最小化、最小化则还原、收在托盘则拉起（常驻 PowerShell 调 user32）
+├── 双击 → 用「上一次轮询到的焦点」决定：在 DSH 前台 → 最小化；否则 → 拉到最前
+│   （点球本身会抢走焦点，所以不能用「此刻的前台窗口」判断）
 └── 轮询 /state：平时 400ms，角标亮着时 120ms → 换表情 + 角标
 ```
 
@@ -73,10 +79,13 @@ dsh-emotion-ball/
 
 ## 已知取舍（写下来是为了以后别再踩）
 
-1. **常驻 PowerShell ≈ 80MB**：双击要 26ms 而不是 400ms，代价是常驻一个 PowerShell
-   （空闲不再退出；helper 退出时收掉，被强杀则由新实例的脚本自愈清理残留）。
-   想省内存就退回按需启动，代价是首次双击慢 ~1s。
-2. **轮询架构**：400ms 轮询 `/state`、1s 轮询主题、双击借用 PowerShell 调 Win32。
+1. **运行时要自备**：首次启用下载 138 MB 的 Electron（解压后 ≈350 MB，放在
+   `~/.dsh/emotion-ball-runtime/`）。这是「删掉 dsh-pet 也不影响小球」的代价；
+   不想下载可以设 `DSH_EMOTION_BALL_ELECTRON` 复用已有 Electron。
+2. **常驻 PowerShell ≈ 80MB**：双击要 26ms 而不是 400ms，代价是常驻一个 PowerShell
+   （默认按需启动、空闲 3 分钟退出；开了「低延迟模式」才常驻）。
+   想省内存就退回按需启动，代价是首次双击慢 ~400ms。
+3. **轮询架构**：400ms 轮询 `/state`、1s 轮询主题、双击借用 PowerShell 调 Win32。
    单个挂件够用，但要做多窗口/多平台就得换通道。
 3. **角标「已读」的三条判定**（任一成立即清）：
    - **你在 DSH 页面里操作过**（点击 / 滚轮 / 按键）——最可靠，不依赖焦点

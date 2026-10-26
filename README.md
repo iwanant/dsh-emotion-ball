@@ -14,7 +14,7 @@
 | 单击小球 | 展开表情选择盘（16 个常用，可切 32 个全量） |
 | 悬停格子 | 实时预览；点一下固定该表情（手动模式） |
 | 拖动 | 移动位置，位置会记住；贴边时面板自动翻转，不会被屏幕裁掉 |
-| 双击 | DSH 开着就最小化，最小化就还原，收在托盘就拉起来 |
+| 双击 | **看得见它**（在前台）→ 最小化；**看不见它**（被盖住 / 最小化 / 在托盘）→ 拉到最前面 / 拉起来 |
 | 右键 | 眼神跟随开关、主题（跟随系统 / 深色 / 浅色）、低延迟模式 |
 | 任务完成 / 出错 | 右上角亮紫色 `!`；有问题等你回答时是 `?` |
 | 你在 DSH 里点/滚/打字 | 角标算已读，自动消失 |
@@ -37,9 +37,13 @@
 
 | 需要 | 说明 |
 |---|---|
-| **Windows 10/11** | 目前只支持 Windows（双击最小化 / 前台判断走 Win32） |
+| **Windows 10/11** | 目前只支持 Windows（双击最小化 / 前台判断走 Win32；解压用系统自带 `tar.exe`） |
 | **DSH** | 桌面版，且插件系统可用 |
-| **Electron 运行时** | 复用 `%USERPROFILE%\.dsh\electron\electron.exe`（装 [dsh-pet](https://github.com/deepseek-ai) 时会带一份） |
+
+**不需要预装 dsh-pet 或任何 Electron。** 第一次启用时插件会自己下载一份 Electron
+运行时（约 138 MB，国内镜像优先、失败自动切官方），存在
+`%USERPROFILE%\.dsh\emotion-ball-runtime\`，之后只认自己这份——
+删掉 dsh-pet 不会影响小球。下载进度会显示在 DSH 窗口右下角，失败可以点重试。
 
 ### 步骤
 
@@ -47,7 +51,8 @@
 2. 打开 DSH → 侧边栏「插件」→ 安装/添加插件 → 选择上面这个目录
 3. 启用后，屏幕右下角出现小球（约 1 秒内）
 
-如果 Electron 运行时不在默认位置，可以设环境变量 `DSH_PET_ELECTRON_PATH` 指向 `electron.exe`。
+想用自己已有的 Electron 也可以：设环境变量 `DSH_EMOTION_BALL_ELECTRON` 指向 `electron.exe`，
+插件就不会再下载。
 
 ## 内存占用
 
@@ -64,7 +69,7 @@ Chromium 窗口的固有开销，不是漏内存：
 ## 已知限制
 
 - **仅 Windows**：Linux/macOS 上桌面窗口起不来
-- **依赖 Electron 运行时**：没有 `~/.dsh/electron/electron.exe` 就不会显示球（不报错，安静降级）
+- **首次要下载 138 MB**：运行时归插件自己所有（≈350 MB 解压后），不想下载可以设 `DSH_EMOTION_BALL_ELECTRON` 复用已有 Electron
 - **单显示器假设**：多显示器 / 高 DPI 下的位置记忆可能偏移几像素
 - **`set_emotion` 工具还在**：每次请求约 +228 输入 token，不用可以删掉工具定义
 
@@ -90,13 +95,26 @@ Electron helper（helper/main.js）
 
 **分两层，请注意：**
 
-- 本项目自己的代码（`index.js`、`client.js`、`lib/`、`helper/`）：**MIT**（见 `LICENSE`）
-- `assets/emotion-ball/` 的球形象与引擎：来自 *Emotion Ball* 项目，
-  遵循 **Emotion Ball Community License**（见 `assets/emotion-ball/LICENSE` 与 `NOTICE.md`）：
+- 本项目自己的代码（`index.js`、`client.js`、`lib/`、`helper/`、`test/`）：**MIT**（见 `LICENSE`）
+- `assets/emotion-ball/` 的球形象与引擎：来自 *Emotion Ball* 项目，遵循
+  **Emotion Ball Community License**（见 `assets/emotion-ball/LICENSE`）：
   **球形象的视觉设计仅限个人学习研究，禁止商用，且作者不提供商业授权。**
 
-也就是说：这个插件可以自由使用、修改、分发，但**不能商用**——除非你换掉球的美术。
-渲染层只需要 `assets/emotion-ball/ball.html` + `js/`，换成你自己的素材即可。
+细节和"想商用怎么办"写在 [THIRD-PARTY.md](THIRD-PARTY.md)。
+
+## 开发
+
+`sh
+# 状态机断言（改 lib/state.js 后跑）
+node test/host-state.mjs
+
+# 页面内联脚本语法检查（改 ball.html 后必跑，曾经因为多一个 }); 白屏）
+node test/html-scripts.mjs assets/emotion-ball/ball.html
+`
+
+调试模式：给 helper 加 `--dev=1`（或环境变量 `DSH_EMOTION_BALL_DEV=1`）会打开
+`%APPDATA%\dsh-emotion-ball-helper\input.log`，里面记录鼠标命中、双击命令、
+PowerShell 回包，排查问题时很有用。
 
 ## 致谢
 

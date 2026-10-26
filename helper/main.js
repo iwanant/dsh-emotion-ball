@@ -61,7 +61,7 @@ let layout = 'up';
 let panelAlign = 'right';
 
 /** 鐢ㄦ埛璁剧疆锛氱溂绁炶窡闅?+ 涓婚鍋忓ソ銆傚瓨 userData/settings.json銆?*/
-let settings = { gaze: true, theme: 'auto', lowLatency: false };
+let settings = { gaze: true, theme: 'auto', lowLatency: false, lastFocus: null };
 let settingsFile = null;
 const GAZE_RADIUS = 260;
 
@@ -73,6 +73,7 @@ function readSettings() {
         gaze: parsed.gaze !== false,
         theme: parsed.theme === 'dark' || parsed.theme === 'light' ? parsed.theme : 'auto',
         lowLatency: parsed.lowLatency === true,
+        lastFocus: typeof parsed.lastFocus === 'boolean' ? parsed.lastFocus : null,
       };
     }
   } catch {
@@ -105,7 +106,7 @@ function themeName() {
 }
 
 function ballUrl() {
-  return `${ORIGIN}/ball.html?surface=desktop&theme=${themeName()}&v=7`;
+  return `${ORIGIN}/ball.html?surface=desktop&theme=${themeName()}&v=9`;
 }
 
 function readPosition() {
@@ -413,6 +414,9 @@ function sendBadge(payload) {
  * Node 娌℃湁鍘熺敓 Win32锛屾墍浠ュ€?PowerShell 璋?user32銆備絾**姣忔鍙屽嚮鍐峰惎鍔ㄤ竴娆? * PowerShell锛堣繕瑕佺幇鍦虹紪璇?C#锛夎 300~400ms**锛屾墜鎰熷緢宸€? * 鎵€浠ヨ繖閲屾敼鎴愶細绗竴娆＄敤鍒版椂璧蜂竴涓?*甯搁┗**鐨?PowerShell锛屼箣鍚庡弻鍑诲彧寰€瀹?stdin
  * 鍐欎竴琛?"toggle"锛屽欢杩熼檷鍒板嚑鍗佹绉掋€? */
 const DSH_TOGGLE_PS = [
+  /* 注意：这个脚本里**不要写中文注释**。
+     PowerShell 5 按 ANSI 读无 BOM 的 .ps1，中文注释会被解成乱码，
+     甚至把换行吃掉，导致下一行代码被并进注释里（踩过）。 */
   '$ErrorActionPreference = "SilentlyContinue"',
   '# kill stale instances left by a force-killed helper',
   `Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*dsh-toggle-loop.ps1*' -and $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`,
@@ -424,6 +428,11 @@ const DSH_TOGGLE_PS = [
   '  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);',
   '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);',
   '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+  '  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);',
+  '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);',
+  '  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);',
+  '  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();',
+  '  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr extra);',
   '}',
   '"@',
   '[Console]::Out.WriteLine("ready")',
@@ -432,21 +441,40 @@ const DSH_TOGGLE_PS = [
   '  $line = [Console]::In.ReadLine()',
   '  if ($null -eq $line) { break }',
   '  $cmd = $line.Trim()',
-  '  if ($cmd -ne "toggle" -and $cmd -ne "show" -and $cmd -ne "focus") { continue }',
+  '  if ($cmd -ne "minimize" -and $cmd -ne "show" -and $cmd -ne "focus") { continue }',
+  '  $p = [System.Diagnostics.Process]::GetProcessesByName("DeepSeek Harness") | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1',
   '  if ($cmd -eq "focus") {',
-  '    $fp = [System.Diagnostics.Process]::GetProcessesByName("DeepSeek Harness") | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1',
-  '    $isFg = ($null -ne $fp) -and ($fp.MainWindowHandle -eq [EBW32]::GetForegroundWindow())',
+  '    $isFg = ($null -ne $p) -and ($p.MainWindowHandle -eq [EBW32]::GetForegroundWindow())',
   '    [Console]::Out.WriteLine("focus=" + [int]$isFg)',
   '    [Console]::Out.Flush()',
   '    continue',
   '  }',
-  '  $p = [System.Diagnostics.Process]::GetProcessesByName("DeepSeek Harness") | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1',
   '  if (-not $p) {',
   '    if ($env:EB_DSH_EXE) { Start-Process $env:EB_DSH_EXE }',
+  '    [Console]::Out.WriteLine("ok")',
+  '    [Console]::Out.Flush()',
+  '    continue',
+  '  }',
+  '  $h = $p.MainWindowHandle',
+  '  if ($cmd -eq "minimize" -and -not [EBW32]::IsIconic($h)) {',
+  '    [EBW32]::ShowWindow($h, 6) | Out-Null',
   '  } else {',
-  '    $h = $p.MainWindowHandle',
-  '    if ($cmd -eq "toggle" -and -not [EBW32]::IsIconic($h)) { [EBW32]::ShowWindow($h, 6) | Out-Null }',
-  '    else { [EBW32]::ShowWindow($h, 9) | Out-Null; [EBW32]::SetForegroundWindow($h) | Out-Null }',
+  '    # raise: foreground lock blocks SetForegroundWindow from a background process,',
+  '    # so attach to the foreground thread first, then ALT-key trick, then SwitchToThisWindow.',
+  '    [EBW32]::ShowWindow($h, 9) | Out-Null',
+  '    if ([EBW32]::GetForegroundWindow() -ne $h) {',
+  '      $fgThread = [EBW32]::GetWindowThreadProcessId([EBW32]::GetForegroundWindow(), [IntPtr]::Zero)',
+  '      $myThread = [EBW32]::GetCurrentThreadId()',
+  '      if ($fgThread -ne 0) { [EBW32]::AttachThreadInput($myThread, $fgThread, $true) | Out-Null }',
+  '      [EBW32]::BringWindowToTop($h) | Out-Null',
+  '      [EBW32]::SetForegroundWindow($h) | Out-Null',
+  '      if ($fgThread -ne 0) { [EBW32]::AttachThreadInput($myThread, $fgThread, $false) | Out-Null }',
+  '    }',
+  '    if ([EBW32]::GetForegroundWindow() -ne $h) {',
+  '      [EBW32]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)',
+  '      [EBW32]::SetForegroundWindow($h) | Out-Null',
+  '      [EBW32]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)',
+  '    }',
   '  }',
   '  [Console]::Out.WriteLine("ok")',
   '  [Console]::Out.Flush()',
@@ -454,6 +482,30 @@ const DSH_TOGGLE_PS = [
 ].join('\n');
 
 let toggleProc = null;
+/** PowerShell 打印 ready 的 promise：冷启动时要等它，否则命令发太早。 */
+let procReady = null;
+let procReadyResolve = null;
+/** 等待 focus= 回答的回调队列。 */
+const focusWaiters = [];
+
+/** 主动问一次「现在 DSH 在前台吗」，最多等 timeoutMs。 */
+function askFocus(proc, timeoutMs = 400) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      resolve(value);
+    };
+    focusWaiters.push(finish);
+    setTimeout(() => finish(null), timeoutMs);
+    try {
+      proc.stdin.write('focus\n');
+    } catch {
+      finish(null);
+    }
+  });
+}
 let toggleIdleTimer = null;
 /** 用完后保活 3 分钟：连续操作不用反复冷启动，闲着就把 73MB 还回去。 */
 const TOGGLE_IDLE_MS = 3 * 60 * 1000;
@@ -505,6 +557,8 @@ function touchToggleIdle() {
 /** 鎳掑惎鍔ㄥ父椹?PowerShell锛堢涓€娆″弻鍑讳細鎱竴鐐癸紝涔嬪悗涓€鐩存槸鐑殑锛夈€?*/
 function ensureToggleProc() {
   if (toggleProc && toggleProc.exitCode === null) return toggleProc;
+  /* 冷启动没有「刚才」，先用上次持久化的焦点状态，避免第一次双击判错方向 */
+  if (typeof settings.lastFocus === 'boolean') dshForeground = settings.lastFocus;
   try {
     /* 蹇呴』钀界洏鐢?-File 璺戯細鎶婂甫 here-string 鐨勫琛岃剼鏈杩?-Command锛?       PowerShell 瑙ｆ瀽涓嶄簡锛圓dd-Type 闈欓粯澶辫触锛岀粨鏋滃弻鍑绘鏃犲弽搴旓級銆?*/
     const scriptFile = path.join(app.getPath('userData'), 'dsh-toggle-loop.ps1');
@@ -524,12 +578,26 @@ function ensureToggleProc() {
     toggleProc.stdout.on('data', (chunk) => {
       const text = String(chunk);
       /* focus=1 / focus=0：常驻 PowerShell 报的「DSH 是不是前台窗口」 */
+      if (text.includes('ready') && procReadyResolve) {
+        procReadyResolve();
+        procReadyResolve = null;
+      }
       const match = /focus=(\d)/.exec(text);
       if (match) {
         const next = match[1] === '1';
         if (next !== dshForeground) {
           dshForeground = next;
+          settings.lastFocus = next;
+          saveSettings();
           reportFocus(next);
+        }
+        while (focusWaiters.length) {
+          const finish = focusWaiters.shift();
+          try {
+            finish(next);
+          } catch {
+            /* 忽略 */
+          }
         }
       }
       const trimmed = text.trim();
@@ -542,6 +610,9 @@ function ensureToggleProc() {
     toggleProc.on('error', () => {
       toggleProc = null;
     });
+    /* 一起动就开始每秒问一次焦点，toggle 时才有一秒内的「刚才在不在前台」 */
+    procReady = new Promise((resolve) => { procReadyResolve = resolve; });
+    startFocusPolling();
     toggleProc.on('exit', () => {
       toggleProc = null;
     });
@@ -552,7 +623,7 @@ function ensureToggleProc() {
   }
 }
 
-function toggleDshWindow() {
+async function toggleDshWindow() {
   const cold = !toggleProc || toggleProc.exitCode !== null;
   const proc = ensureToggleProc();
   /* 冷启动要 300-400ms：先亮一个「…」给手反馈，1.2 秒后按真实状态收掉 */
@@ -568,15 +639,25 @@ function toggleDshWindow() {
     openDsh();
     return;
   }
+  /*
+   * 发哪个命令？用「刚才 DSH 是不是在前台」判断，而不是此刻——
+   * 点球本身会把焦点从 DSH 抢走，所以此刻永远是「不在前台」。
+   * dshForeground 由常驻 PowerShell 每秒上报一次，最多差 1 秒，正好代表「你点球之前」。
+   */
+  /* 冷启动时 PowerShell 还没报过焦点：先等它 ready，再主动问一次。
+     否则第一次双击永远按「不在前台」处理，只会把窗口拉到前面、不会最小化。 */
+  /* 注意：这里不能再问一次「现在在前台吗」——点球已经把焦点抢走了，问了必然是否。
+     冷启动靠 settings.lastFocus 的历史值，热启动靠 1s 轮询。 */
+  const command = dshForeground === true ? 'minimize' : 'show';
   try {
-    proc.stdin.write('toggle\n');
+    proc.stdin.write(command + '\n');
     logInput('dsh-toggle sent');
   } catch {
     /* 绠￠亾鏂簡灏遍噸鏉ヤ竴娆?*/
     toggleProc = null;
     const retry = ensureToggleProc();
     try {
-      if (retry) retry.stdin.write('toggle\n');
+      if (retry) retry.stdin.write(command + '\n');
       else openDsh();
     } catch {
       openDsh();
@@ -989,7 +1070,7 @@ function startHitTest() {
 ipcMain.on('ball:theme', (_event, theme) => {
   if (theme === 'dark' || theme === 'light') {
     /* 璋冭壊鏉挎槸寮曟搸娉ㄥ唽鍓嶆敼鐨勭瀛愶紝鍙兘閲嶈浇椤甸潰锛涢噸杞藉悗 did-finish-load 浼氶噸鏂版媺鐘舵€?*/
-    if (win && !win.isDestroyed()) win.loadURL(`${ORIGIN}/ball.html?surface=desktop&theme=${theme}&v=7`);
+    if (win && !win.isDestroyed()) win.loadURL(`${ORIGIN}/ball.html?surface=desktop&theme=${theme}&v=9`);
   }
 });
 
@@ -1173,7 +1254,7 @@ if (!app.requestSingleInstanceLock()) {
 
     nativeTheme.on('updated', () => {
       if (!win || win.isDestroyed()) return;
-      win.loadURL(`${ORIGIN}/ball.html?surface=desktop&theme=${themeName()}&v=7`);
+      win.loadURL(`${ORIGIN}/ball.html?surface=desktop&theme=${themeName()}&v=9`);
     });
 
     if (probePath) {

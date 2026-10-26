@@ -591,20 +591,33 @@
     if (event.key === 'Escape') collapse();
   });
 
-  /* 单击开合、双击拉 DSH：单击延迟 220ms，好在双击时取消。
+  /* 单击开合、双击拉 DSH：单击延迟 260ms（略大于常见双击间隔），第二下点击会取消它。
      suppressClick：拖完手时浏览器仍会补一个 click，必须吃掉，否则拖一下就把面板关了。 */
   var clickTimer = null;
   var suppressClick = false;
+  var lastClickAt = 0;
   ballWrap.addEventListener('click', function () {
     if (suppressClick) {
       suppressClick = false;
+      return;
+    }
+    var now = Date.now();
+    var isSecondClick = now - lastClickAt < 420;
+    lastClickAt = now;
+    /* 双击的第二下：把待定的单击撤掉，并直接返回——交给 dblclick 处理。
+       否则两下间隔超过 180ms 时，面板会先弹出来再被收掉（"闪一下"）。 */
+    if (isSecondClick) {
+      if (clickTimer) {
+        clearTimeout(clickTimer);
+        clickTimer = null;
+      }
       return;
     }
     if (clickTimer) return;
     clickTimer = setTimeout(function () {
       clickTimer = null;
       toggle();
-    }, 180);
+    }, 260);
   });
   ballWrap.addEventListener('dblclick', function () {
     if (clickTimer) {

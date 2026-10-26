@@ -112,6 +112,106 @@ window.__ModuleLoader__.load({
       }
 
       /* 对话里的极轻标记。 */
+      /*
+       * 运行时下载进度条：球是独立窗口，没有 Electron 就跑不起来，
+       * 这段时间必须在 DSH 界面里给个反馈，否则用户只会觉得"装了啥也没有"。
+       */
+      const RuntimeNotice = () => {
+        const [runtime, setRuntime] = React.useState(null);
+        React.useEffect(() => {
+          let cancelled = false;
+          const tick = () => {
+            fetch(ORIGIN + '/state', { cache: 'no-store' })
+              .then((response) => (response.ok ? response.json() : null))
+              .then((data) => {
+                if (!cancelled && data && data.runtime) setRuntime(data.runtime);
+              })
+              .catch(() => {});
+          };
+          tick();
+          const timer = window.setInterval(tick, 1500);
+          return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+          };
+        }, []);
+
+        if (!runtime || runtime.state === 'ready' || runtime.state === 'idle') return null;
+
+        const mb = (bytes) => (bytes ? (bytes / 1024 / 1024).toFixed(0) : '?');
+        let text = '';
+        if (runtime.state === 'downloading') {
+          text = `情绪小球 · 正在下载运行时 ${runtime.percent || 0}%（${mb(runtime.received)} / ${mb(runtime.total)} MB）`;
+        } else if (runtime.state === 'verifying') {
+          text = '情绪小球 · 正在校验安装包…';
+        } else if (runtime.state === 'extracting') {
+          text = '情绪小球 · 正在解压…';
+        } else if (runtime.state === 'error') {
+          text = `情绪小球 · 运行时准备失败：${runtime.error || '未知原因'}`;
+        } else {
+          return null;
+        }
+
+        const failed = runtime.state === 'error';
+        return h(
+          'div',
+          {
+            style: {
+              position: 'fixed',
+              right: 16,
+              bottom: 16,
+              zIndex: 60,
+              maxWidth: 420,
+              padding: '8px 12px',
+              borderRadius: 10,
+              fontSize: 12,
+              lineHeight: 1.5,
+              pointerEvents: 'auto',
+              background: failed ? 'rgba(229,72,77,.96)' : 'rgba(24,24,30,.94)',
+              color: '#fff',
+              boxShadow: '0 8px 24px rgba(0,0,0,.35)',
+              fontFamily: 'system-ui, -apple-system, "Microsoft YaHei", sans-serif',
+            },
+          },
+          text,
+          failed
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  onClick: () => {
+                    fetch(ORIGIN + '/runtime/retry', { method: 'GET' }).catch(() => {});
+                    setRuntime({ state: 'downloading', percent: 0 });
+                  },
+                  style: {
+                    marginLeft: 8,
+                    border: 0,
+                    borderRadius: 6,
+                    padding: '2px 8px',
+                    cursor: 'pointer',
+                    background: 'rgba(255,255,255,.2)',
+                    color: '#fff',
+                    fontSize: 12,
+                  },
+                },
+                '重试',
+              )
+            : null,
+        );
+      };
+
+      ctx.slots.inject('shell.overlay', function* () {
+        yield ctx.slots.register(
+          {
+            name: 'shell.overlay',
+            id: 'emotion-ball-runtime',
+            order: 950,
+            locale: NS,
+          },
+          RuntimeNotice,
+        );
+      });
+
       ctx.slots.inject('tool.call.toolview', function* () {
         yield ctx.slots.register(
           {

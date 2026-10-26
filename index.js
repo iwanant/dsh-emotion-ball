@@ -22,6 +22,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { createEmotionState } from './lib/state.js';
+import { createRuntimeInstaller, ELECTRON_VERSION } from './lib/runtime.js';
 
 /** ESM 里没有 require：借一份用来取 Electron 的 BrowserWindow。 */
 const nodeRequire = createRequire(import.meta.url);
@@ -105,19 +106,38 @@ function parseArguments(raw) {
 /** 桌面球开关：默认开；设 DSH_EMOTION_BALL_DESKTOP=0 可临时关掉（过渡期调试用）。 */
 const DESKTOP_BALL_ENABLED = process.env.DSH_EMOTION_BALL_DESKTOP !== '0';
 
-/** 找 Electron 运行时：优先复用 dsh-pet 落到 $DSH_HOME/electron 的那份。 */
+/**
+ * 自备 Electron 运行时的安装器：**不借用 dsh-pet**，删掉它球也不会报废。
+ * 存在 ~/.dsh/emotion-ball-runtime/ 下，跟着用户目录走。
+ */
+const runtimeRoot = path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'emotion-ball-runtime');
+const runtimeInstaller = DESKTOP_BALL_ENABLED
+  ? createRuntimeInstaller({
+      rootDir: runtimeRoot,
+      onChange: (progress) => {
+        if (progress.state === 'error') console.warn('[emotion-ball] 运行时准备失败:', progress.error);
+        if (progress.state === 'ready') {
+          console.info('[emotion-ball] 运行时就绪:', progress.targetDir);
+          if (!desktopChild) {
+            desktopChild = startDesktopBall(resolveElectron());
+          }
+        }
+      },
+    })
+  : null;
+
+/** 桌面球进程，避免重复启动。 */
+let desktopChild = null;
+
+/**
+ * 找 Electron 运行时：**只认自己那份**（或显式环境变量）。
+ * 刻意不再借用 dsh-pet 的 `$DSH_HOME/electron`——用户删掉 dsh-pet 时球会一起报废。
+ * 自己没有就返回 null，由 ensureRuntime() 去下载。
+ */
 function resolveElectron() {
-  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
-  const exe = process.platform === 'win32' ? 'electron.exe' : 'electron';
-  const candidates = [
-    process.env.DSH_EMOTION_BALL_ELECTRON,
-    process.env.DSH_PET_ELECTRON_PATH,
-    path.join(home, 'electron', exe),
-  ];
-  for (const candidate of candidates) {
-    if (candidate && fs.existsSync(candidate)) return candidate;
-  }
-  return null;
+  const override = process.env.DSH_EMOTION_BALL_ELECTRON;
+  if (override && fs.existsSync(override)) return override;
+  return runtimeInstaller ? runtimeInstaller.electronPath() : null;
 }
 
 /** DSH 自己的可执行文件，双击小球时用它拉起（单实例锁会把它变成「聚焦」）。 */
@@ -128,11 +148,10 @@ function resolveDshExe() {
   }
   return null;
 }
-
-function startDesktopBall() {
-  const electron = resolveElectron();
-  if (!electron) {
-    console.warn('[emotion-ball] 找不到 Electron 运行时，桌面球不启动（网页内那颗不受影响）');
+function startDesktopBall(electron) {
+  const target = electron || resolveElectron();
+  if (!target) {
+    console.warn('[emotion-ball] 还没有可用的 Electron 运行时，桌面球不启动');
     return null;
   }
   const env = { ...process.env };
@@ -146,14 +165,14 @@ function startDesktopBall() {
   if (dshExe) argv.push(`--dsh-exe=${dshExe}`);
 
   try {
-    const child = spawn(electron, argv, { stdio: 'ignore', env });
+    const child = spawn(target, argv, { stdio: 'ignore', env });
     child.on('error', (error) => {
       console.warn('[emotion-ball] 桌面球启动失败:', error && error.message);
     });
     child.on('exit', (code) => {
       if (code !== 0) console.warn('[emotion-ball] 桌面球退出，code =', code);
     });
-    console.info('[emotion-ball] 桌面球已启动', { electron, dshExe: dshExe || '(未找到)' });
+    console.info('[emotion-ball] 桌面球已启动', { electron: target, dshExe: dshExe || '(未找到)' });
     return child;
   } catch (error) {
     console.warn('[emotion-ball] 桌面球 launch 异常:', error && error.message);
@@ -195,6 +214,7 @@ function resolveRoute(pathname) {
   if (pathname === '/theme') return { file: null, body: null, theme: true };
   if (pathname === '/focus') return { file: null, body: null, focus: true };
   if (pathname === '/badge') return { file: null, body: null, badge: true };
+  if (pathname === '/runtime/retry') return { file: null, body: null, runtimeRetry: true };
   if (pathname === '/activity') return { file: null, body: null, activity: true };
   /* 本机调试：模拟「等你回答」的开始/结束，用来测量角标延迟 */
   if (pathname === '/debug/pending') return { file: null, body: null, debugPending: true };
@@ -270,6 +290,15 @@ function handle(req, res) {
         'Access-Control-Allow-Origin': '*',
       });
     }
+    if (route.runtimeRetry) {
+      if (!runtimeInstaller) return send(res, 400, 'desktop disabled');
+      runtimeInstaller.reset();
+      runtimeInstaller.ensure().catch(() => {});
+      return send(res, 200, JSON.stringify(runtimeInstaller.progress), {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+      });
+    }
     if (route.badge) {
       const on = url.searchParams.get('on') === '1';
       let parsedLog = null;
@@ -313,6 +342,7 @@ function handle(req, res) {
         helperFocused,
         lastActivityAt,
         badge: badgeState,
+        runtime: runtimeInstaller ? runtimeInstaller.progress : null,
         recent: recentEvents,
         focusError,
         ...debug,
@@ -523,14 +553,21 @@ export function apply(ctx) {
 
   attachStateMachine(ctx);
 
-  /* 桌面球：插件的生命周期就是它的生命周期。 */
+  /* 桌面球：插件的生命周期就是它的生命周期。
+     运行时没准备好时先去下载，下好了 onChange 里再启动。 */
   ctx.effect(() => {
-    if (!DESKTOP_BALL_ENABLED) {
-      console.info('[emotion-ball] 桌面球未启用（等选择盘迁移完成）；设 DSH_EMOTION_BALL_DESKTOP=1 可提前试用');
+    if (!DESKTOP_BALL_ENABLED || !runtimeInstaller) {
       return () => {};
     }
-    const child = startDesktopBall();
-    return () => stopDesktopBall(child);
+    /* 有就直接起（安装器会先把状态置 ready），没有就去下载；
+       下载完成后 onChange 里会启动。 */
+    runtimeInstaller.ensure().catch(() => {
+      /* onChange 里已经记录了错误，页面会显示 */
+    });
+    return () => {
+      stopDesktopBall(desktopChild);
+      desktopChild = null;
+    };
   }, 'emotion-ball: desktop helper');
 }
 
