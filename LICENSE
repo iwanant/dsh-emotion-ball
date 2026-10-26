@@ -19,12 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This license covers this project's own source code only
-(index.js, client.js, lib/, helper/, test/).
-
-The artwork and rendering engine under assets/emotion-ball/ are third-party
-work under a different license — see THIRD-PARTY.md and
-assets/emotion-ball/LICENSE.
