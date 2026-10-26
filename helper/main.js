@@ -415,17 +415,20 @@ function sendBadge(payload) {
  * 鍐欎竴琛?"toggle"锛屽欢杩熼檷鍒板嚑鍗佹绉掋€? */
 const DSH_TOGGLE_PS = [
   /* 注意：这个脚本里**不要写中文注释**。
-     PowerShell 5 按 ANSI 读无 BOM 的 .ps1，中文注释会被解成乱码，
-     甚至把换行吃掉，导致下一行代码被并进注释里（踩过）。 */
+     PowerShell 5 按 ANSI 读无 BOM 的 .ps1，中文会被解成乱码，
+     甚至把换行吃掉、让下一行代码并进注释（踩过两次）。 */
   '$ErrorActionPreference = "SilentlyContinue"',
   '# kill stale instances left by a force-killed helper',
   `Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*dsh-toggle-loop.ps1*' -and $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`,
   'Add-Type -TypeDefinition @"',
   'using System;',
   'using System.Runtime.InteropServices;',
+  '[StructLayout(LayoutKind.Sequential)] public struct EBRECT { public int Left; public int Top; public int Right; public int Bottom; }',
+  '[StructLayout(LayoutKind.Sequential)] public struct EBPOINT { public int X; public int Y; }',
   'public class EBW32 {',
   '  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);',
   '  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);',
+  '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);',
   '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);',
   '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
   '  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);',
@@ -433,6 +436,9 @@ const DSH_TOGGLE_PS = [
   '  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);',
   '  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();',
   '  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr extra);',
+  '  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out EBRECT r);',
+  '  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(EBPOINT p);',
+  '  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);',
   '}',
   '"@',
   '[Console]::Out.WriteLine("ready")',
@@ -441,7 +447,7 @@ const DSH_TOGGLE_PS = [
   '  $line = [Console]::In.ReadLine()',
   '  if ($null -eq $line) { break }',
   '  $cmd = $line.Trim()',
-  '  if ($cmd -ne "minimize" -and $cmd -ne "show" -and $cmd -ne "focus") { continue }',
+  '  if ($cmd -ne "toggle" -and $cmd -ne "focus") { continue }',
   '  $p = [System.Diagnostics.Process]::GetProcessesByName("DeepSeek Harness") | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1',
   '  if ($cmd -eq "focus") {',
   '    $isFg = ($null -ne $p) -and ($p.MainWindowHandle -eq [EBW32]::GetForegroundWindow())',
@@ -451,16 +457,32 @@ const DSH_TOGGLE_PS = [
   '  }',
   '  if (-not $p) {',
   '    if ($env:EB_DSH_EXE) { Start-Process $env:EB_DSH_EXE }',
-  '    [Console]::Out.WriteLine("ok")',
+  '    [Console]::Out.WriteLine("ok none")',
   '    [Console]::Out.Flush()',
   '    continue',
   '  }',
   '  $h = $p.MainWindowHandle',
-  '  if ($cmd -eq "minimize" -and -not [EBW32]::IsIconic($h)) {',
+  '  # Decide by occlusion, not by foreground: overlays such as dsh-pet constantly',
+  '  # steal the foreground, so "is DSH foreground" is false even while you look at it.',
+  '  # Hit-test the centre of the DSH window:',
+  '  #   centre belongs to DSH  -> you can see it -> minimise',
+  '  #   centre belongs to another window, or window is minimised/hidden -> raise it',
+  '  $visible = $false',
+  '  if ([EBW32]::IsWindowVisible($h) -and -not [EBW32]::IsIconic($h)) {',
+  '    $rc = New-Object EBRECT',
+  '    [EBW32]::GetWindowRect($h, [ref]$rc) | Out-Null',
+  '    if ($rc.Right -gt $rc.Left -and $rc.Bottom -gt $rc.Top) {',
+  '      $pt = New-Object EBPOINT',
+  '      $pt.X = [int](($rc.Left + $rc.Right) / 2)',
+  '      $pt.Y = [int](($rc.Top + $rc.Bottom) / 2)',
+  '      $at = [EBW32]::GetAncestor([EBW32]::WindowFromPoint($pt), 2)',
+  '      if ($at -eq $h) { $visible = $true }',
+  '    }',
+  '  }',
+  '  if ($visible) {',
   '    [EBW32]::ShowWindow($h, 6) | Out-Null',
+  '    [Console]::Out.WriteLine("ok minimize")',
   '  } else {',
-  '    # raise: foreground lock blocks SetForegroundWindow from a background process,',
-  '    # so attach to the foreground thread first, then ALT-key trick, then SwitchToThisWindow.',
   '    [EBW32]::ShowWindow($h, 9) | Out-Null',
   '    if ([EBW32]::GetForegroundWindow() -ne $h) {',
   '      $fgThread = [EBW32]::GetWindowThreadProcessId([EBW32]::GetForegroundWindow(), [IntPtr]::Zero)',
@@ -475,8 +497,8 @@ const DSH_TOGGLE_PS = [
   '      [EBW32]::SetForegroundWindow($h) | Out-Null',
   '      [EBW32]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)',
   '    }',
+  '    [Console]::Out.WriteLine("ok raise")',
   '  }',
-  '  [Console]::Out.WriteLine("ok")',
   '  [Console]::Out.Flush()',
   '}',
 ].join('\n');
@@ -648,7 +670,9 @@ async function toggleDshWindow() {
      否则第一次双击永远按「不在前台」处理，只会把窗口拉到前面、不会最小化。 */
   /* 注意：这里不能再问一次「现在在前台吗」——点球已经把焦点抢走了，问了必然是否。
      冷启动靠 settings.lastFocus 的历史值，热启动靠 1s 轮询。 */
-  const command = dshForeground === true ? 'minimize' : 'show';
+  /* 方向交给 PowerShell 判断（它看得到窗口是否被遮挡）；
+     这里只发 toggle，避免依赖随时会被桌宠抢走的焦点状态。 */
+  const command = 'toggle';
   try {
     proc.stdin.write(command + '\n');
     logInput('dsh-toggle sent');
