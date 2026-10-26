@@ -1,0 +1,57 @@
+{
+  "name": "dsh-emotion-ball",
+  "version": "0.2.0",
+  "private": true,
+  "description": "A desktop emotion ball for DeepSeek Harness: a 44x44 always-on-top widget that reflects the agent's real work state.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "widget",
+    "electron",
+    "emotion",
+    "desktop"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "helper",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "assets/emotion-ball"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection"
+      ]
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/REPLACE-ME/dsh-emotion-ball.git"
+  },
+  "homepage": "https://github.com/REPLACE-ME/dsh-emotion-ball#readme",
+  "bugs": {
+    "url": "https://github.com/REPLACE-ME/dsh-emotion-ball/issues"
+  },
+  "os": [
+    "win32"
+  ]
+}

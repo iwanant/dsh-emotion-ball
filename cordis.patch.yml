@@ -1,0 +1,7 @@
+# dsh-emotion-ball 的 bundle patch。
+# insert 一行 entry：name 解析到本包入口 index.js（宿主半侧）。
+# 客户端半侧由 package.json 的 dsh.client 声明，DSH 模块系统会把本包
+# 当作浏览器插件提供 client.js。
+- insert:
+    - id: dsh-emotion-ball
+      name: 'dsh-emotion-ball'

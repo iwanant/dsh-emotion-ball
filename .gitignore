@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+pnpm-lock.yaml
+
+# 运行期产物（不该进仓库）
+*.log
+input.log
+settings.json
+ball-window.json
+dsh-toggle-loop.ps1
+
+# 测试/调试临时产物
+_scratch/
+test-output/
+*.png.bak
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

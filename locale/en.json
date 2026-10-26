@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Emotion Ball",
+    "description": "A 56×56 Emotion Ball in the bottom-right corner that mirrors what the agent is doing right now: thinking, searching, busy, waiting for you, erroring, done. Click it for a 32-emotion picker, and the agent can call set_emotion to show a mood of its own."
+  }
+}

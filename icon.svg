@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Emotion Ball">
+  <defs>
+    <radialGradient id="eb-body" cx="38%" cy="30%" r="78%">
+      <stop offset="0%" stop-color="#F7F3EA"/>
+      <stop offset="62%" stop-color="#E7E0D2"/>
+      <stop offset="100%" stop-color="#C9BFAC"/>
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="#1B1A18"/>
+  <path d="M32 9c12.7 0 23 10.3 23 23S44.7 55 32 55 9 44.7 9 32 19.3 9 32 9z" fill="url(#eb-body)"/>
+  <ellipse cx="24.5" cy="30" rx="3.4" ry="5.2" fill="#1A1A1A"/>
+  <ellipse cx="39.5" cy="30" rx="3.4" ry="5.2" fill="#1A1A1A"/>
+  <path d="M26 41.5c2.6 2 9.4 2 12 0" fill="none" stroke="#1A1A1A" stroke-width="2.6" stroke-linecap="round"/>
+  <circle cx="47" cy="45" r="4.2" fill="#5B95F0"/>
+</svg>
