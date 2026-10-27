@@ -1,6 +1,6 @@
 {
   "name": "dsh-emotion-ball",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "A desktop emotion ball for DeepSeek Harness: a 44x44 always-on-top widget that reflects the agent's real work state.",
   "keywords": [

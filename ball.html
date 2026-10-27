@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Emotion Ball</title>
+<style>
+  /* 底色一律画在子元素上：根元素背景会被提升成视口画布，而画布不受
+     border-radius 裁切——那会让桌面窗口露出一块方角。 */
+  html {
+    --eb-bg: #09090b;
+    --eb-wash-a: rgba(145, 109, 255, 0.22);
+    --eb-wash-b: rgba(80, 120, 200, 0.12);
+    --eb-core-1: #1b1b22;
+    --eb-core-2: #0e0e12;
+    --eb-edge: #09090b;
+    --eb-shadow: 0.6;
+    --eb-panel-bg: #14141a;
+    --eb-panel-line: rgba(255, 255, 255, 0.10);
+    --eb-panel-edge: rgba(255, 255, 255, 0.17);
+    --eb-rim: rgba(255, 255, 255, 0.13);
+    --eb-rim-hi: rgba(255, 255, 255, 0.26);
+    --eb-text: #f2f2f5;
+    --eb-muted: rgba(242, 242, 245, 0.55);
+    --eb-cell-bg: rgba(255, 255, 255, 0.06);
+    --eb-accent: #916dff;
+  }
+  html[data-theme="light"] {
+    --eb-bg: #fafafa;
+    --eb-wash-a: rgba(145, 109, 255, 0.16);
+    --eb-wash-b: rgba(120, 150, 220, 0.10);
+    --eb-core-1: #ffffff;
+    --eb-core-2: #f4f3f7;
+    --eb-edge: #fafafa;
+    --eb-shadow: 0.16;
+    --eb-panel-bg: #ffffff;
+    --eb-panel-line: rgba(0, 0, 0, 0.10);
+    --eb-panel-edge: rgba(0, 0, 0, 0.16);
+    --eb-rim: rgba(0, 0, 0, 0.14);
+    --eb-rim-hi: rgba(0, 0, 0, 0.28);
+    --eb-text: #1c1c22;
+    --eb-muted: rgba(28, 28, 34, 0.55);
+    --eb-cell-bg: rgba(0, 0, 0, 0.05);
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    cursor: default;
+    user-select: none;
+    font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  #root {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    align-items: flex-end;
+    gap: 8px;
+  }
+  /* 球在屏幕上方时内容朝下展开：球排到最前，整体靠上对齐 */
+  html[data-layout="down"] #root { justify-content: flex-start; align-items: flex-end; }
+  html[data-layout="down"] #ballWrap { order: -1; }
+  /* 左边放不下时翻到右侧：整体靠左对齐 */
+  html[data-align="left"] #root { align-items: flex-start; }
+  /* 朝下展开 + 左锚点时，球要排在最前且靠左 */
+  html[data-layout="down"][data-align="left"] #root { justify-content: flex-start; align-items: flex-start; }
+
+  /* ---------------- 小球 ---------------- */
+  #ballWrap {
+    position: relative;
+    flex: 0 0 auto;
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    overflow: hidden;
+    cursor: pointer;
+    /* 同色背景里也要分得清：一圈极细的内描边（不改尺寸，不会抖） */
+    box-shadow: inset 0 0 0 1px var(--eb-rim);
+    transition: box-shadow .15s ease, filter .15s ease;
+  }
+  #ballWrap:hover { box-shadow: inset 0 0 0 1px var(--eb-rim-hi); filter: brightness(1.06); }
+  #ballWrap:active { filter: brightness(.96); }
+  #wash {
+    position: absolute;
+    inset: 0;
+    border-radius: 12px;
+    pointer-events: none;
+    background-color: var(--eb-bg);
+    background-image:
+      radial-gradient(120% 115% at 50% 34%, var(--eb-wash-a) 0%, rgba(145, 109, 255, 0) 58%),
+      radial-gradient(95% 90% at 50% 58%, var(--eb-wash-b) 0%, rgba(80, 120, 200, 0) 72%),
+      radial-gradient(140% 140% at 50% 42%, var(--eb-core-1) 0%, var(--eb-core-2) 56%, var(--eb-edge) 100%);
+  }
+  #stage {
+    position: absolute;
+    inset: 11%;
+    display: block;
+  }
+  #stage svg { filter: drop-shadow(0 3px 6px rgba(0, 0, 0, var(--eb-shadow))); }
+  /* 小提示角标：系统 toast 之外，球自己也能「亮一下」，不用弹气泡 */
+  #badge {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    min-width: 13px;
+    height: 13px;
+    padding: 0 3px;
+    box-sizing: border-box;
+    border-radius: 999px;
+    background: var(--eb-accent);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 13px;
+    text-align: center;
+    box-shadow: 0 0 0 1.5px var(--eb-bg);
+    display: none;
+    pointer-events: none;
+  }
+  #badge[data-kind="error"] { background: #e5484d; }
+
+  /* ---------------- 选择盘 ---------------- */
+  #panel {
+    flex: 0 0 auto;
+    box-sizing: border-box;
+    width: 268px;
+    /* 32 个表情排下来大约 520px；给到 620 就不会出现滚动条 */
+    max-height: 620px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* 真溢出时也能滚，但不画滚动条（Chromium 用 ::-webkit-scrollbar） */
+    scrollbar-width: none;
+    padding: 10px;
+    border-radius: 14px;
+    border: 1px solid var(--eb-panel-edge);
+    background: var(--eb-panel-bg);
+    color: var(--eb-text);
+    font-size: 12px;
+    /* 内描边 + 外投影：同色背景上也能看出边界 */
+    box-shadow: inset 0 0 0 1px var(--eb-panel-line), 0 16px 40px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  #panel[hidden] { display: none; }
+  #panel::-webkit-scrollbar { width: 0; height: 0; display: none; }
+  /* 出场：窗口尺寸是硬跳变的，所以内容用极短的透明度+位移淡入，遮掉那一下硬边 */
+  #panel, #menu {
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 120ms ease-out, transform 150ms cubic-bezier(.2, .8, .3, 1);
+  }
+  #panel.is-open, #menu.is-open { opacity: 1; transform: none; }
+  .head { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .head strong { font-weight: 600; font-size: 12px; white-space: nowrap; }
+  .count { color: var(--eb-muted); font-size: 10px; white-space: nowrap; }
+  .mode {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid var(--eb-panel-line);
+    color: var(--eb-muted);
+    white-space: nowrap;
+  }
+  .mode[data-manual="1"] { color: var(--eb-accent); border-color: var(--eb-accent); }
+  .spacer { flex: 1; }
+  .chip {
+    font: inherit;
+    font-size: 10px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--eb-panel-line);
+    background: transparent;
+    color: var(--eb-muted);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .chip:hover { color: var(--eb-text); }
+  .chip:disabled { opacity: 0.4; cursor: default; }
+  /* 固定两行：悬停预览时描述长短不一，不能让面板高度跟着跳（高度一跳窗口就裁内容） */
+  .hint {
+    margin: 0;
+    font-size: 10px;
+    line-height: 13px;
+    height: 26px;
+    color: var(--eb-muted);
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  #grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .group { grid-column: 1 / -1; padding-top: 4px; font-size: 10px; letter-spacing: .06em; color: var(--eb-muted); text-transform: uppercase; }
+  .cell {
+    font: inherit;
+    font-size: 12px;
+    padding: 8px 6px;
+    border-radius: 9px;
+    border: 0;
+    background: var(--eb-cell-bg);
+    color: var(--eb-text);
+    cursor: pointer;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    /* 用 inset ring 做出描边：不占布局、不改变尺寸，点它的时候框不会「变一下」 */
+    box-shadow: inset 0 0 0 1px transparent;
+    transition: background 120ms ease, box-shadow 120ms ease, color 120ms ease;
+  }
+  .cell:hover { box-shadow: inset 0 0 0 1px var(--eb-rim-hi); }
+  .cell[data-active="1"] { box-shadow: inset 0 0 0 1px var(--eb-accent); color: var(--eb-text); }
+
+  /* ---------------- 右键菜单 ---------------- */
+  #menu {
+    flex: 0 0 auto;
+    box-sizing: border-box;
+    width: 188px;
+    padding: 5px;
+    border-radius: 12px;
+    border: 1px solid var(--eb-panel-edge);
+    background: var(--eb-panel-bg);
+    color: var(--eb-text);
+    font-size: 12px;
+    box-shadow: inset 0 0 0 1px var(--eb-panel-line), 0 16px 40px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  #menu[hidden] { display: none; }
+  .mi {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 7px 8px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--eb-text);
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .mi:hover { background: var(--eb-cell-bg); }
+  .mi { transition: background 120ms ease; }
+  .mk { width: 12px; flex: 0 0 auto; color: var(--eb-accent); }
+  .sep { height: 1px; margin: 4px 6px; background: var(--eb-panel-line); }
+  .mgroup { padding: 4px 8px 2px; font-size: 10px; color: var(--eb-muted); letter-spacing: .06em; }
+</style>
+</head>
+<body>
+<div id="root">
+  <section id="panel" hidden aria-label="情绪小球">
+    <div class="head">
+      <strong>情绪小球</strong>
+      <span class="count" id="count"></span>
+      <button type="button" class="chip" id="toggleAll">全部</button>
+      <span class="spacer"></span>
+      <span class="mode" id="mode" data-manual="0">自动</span>
+      <button type="button" class="chip" id="reset" disabled>恢复自动</button>
+    </div>
+    <p class="hint" id="hint" data-default="悬停预览 · 点击固定">悬停预览 · 点击固定</p>
+    <div id="grid"></div>
+  </section>
+  <div id="menu" hidden role="menu">
+    <button type="button" class="mi" data-act="gaze"><span class="mk" data-mark="gaze"></span>眼神跟随光标</button>
+    <button type="button" class="mi" data-act="lowlatency"><span class="mk" data-mark="lowlatency"></span>低延迟模式（常驻）</button>
+    <div class="sep"></div>
+    <div class="mgroup">主题</div>
+    <button type="button" class="mi" data-act="theme" data-value="auto"><span class="mk" data-mark="theme:auto"></span>跟随系统</button>
+    <button type="button" class="mi" data-act="theme" data-value="dark"><span class="mk" data-mark="theme:dark"></span>深色</button>
+    <button type="button" class="mi" data-act="theme" data-value="light"><span class="mk" data-mark="theme:light"></span>浅色</button>
+    <div class="sep"></div>
+  </div>
+  <div id="ballWrap">
+    <div id="wash"></div>
+    <div id="stage"></div>
+    <span id="badge"></span>
+  </div>
+</div>
+
+<script src="/js/rings.js"></script>
+<script src="/js/emotions.js"></script>
+<script>
+/* 调色板必须在 engine.js 之前改 EMOTION_SEED —— 引擎在加载时就把 32 条表情
+ * 注册进配置了，之后改种子不会再生效（这也是切换主题要重载页面的原因）。
+ * 只替换「近中性、高亮度」的身体色：深色主题 → 纯白，浅色主题 → 奶油白；
+ * 语义色（出错的警示红等）一律保留。 */
+(function () {
+  'use strict';
+  var theme = 'dark';
+  try {
+    theme = new URLSearchParams(location.search).get('theme') === 'light' ? 'light' : 'dark';
+  } catch (error) {
+    theme = 'dark';
+  }
+  document.documentElement.dataset.theme = theme;
+  window.__EB_THEME = theme;
+
+  var BODY = theme === 'light' ? '#EEEBE4' : '#FFFFFF';
+
+  function parse(hex) {
+    if (typeof hex !== 'string') return null;
+    var h = hex.charAt(0) === '#' ? hex.slice(1) : hex;
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    if (h.length !== 6) return null;
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  }
+
+  function isNeutralLight(hex) {
+    var rgb = parse(hex);
+    if (!rgb) return false;
+    var r = rgb[0], g = rgb[1], b = rgb[2];
+    var max = Math.max(r, g, b);
+    var min = Math.min(r, g, b);
+    if (max === 0) return false;
+    var saturation = (max - min) / max;
+    var luminance = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
+    return saturation < 0.12 && luminance > 0.6;
+  }
+
+  function mapBody(color) {
+    return isNeutralLight(color) ? BODY : color;
+  }
+
+  var seed = window.EMOTION_SEED;
+  if (!Array.isArray(seed)) return;
+  seed.forEach(function (item) {
+    if (!item) return;
+    if (!item.body || typeof item.body !== 'object') item.body = {};
+    if (typeof item.body.color === 'string') item.body.color = mapBody(item.body.color);
+    else item.body.color = BODY;
+    var frames = item.sequence && item.sequence.frames;
+    if (Array.isArray(frames)) {
+      frames.forEach(function (frame) {
+        if (frame && frame.body && typeof frame.body.color === 'string') {
+          frame.body.color = mapBody(frame.body.color);
+        }
+      });
+    }
+  });
+})();
+</script>
+<script src="/js/ball.js"></script>
+<script src="/js/engine.js"></script>
+<script>
+/* 球球画布 + 选择盘。两种宿主共用：
+ *   网页版 —— 父窗口 postMessage({ type:'emotion', emotionId })
+ *   桌面版 —— Electron 注入 window.dshBall，主进程调 window.__EB_SET(id)
+ * 拖动 / 开 DSH / 展开面板都走 preload 暴露的桥，页面不碰 Node。 */
+(function () {
+  'use strict';
+
+  var bridge = window.dshBall && window.dshBall.surface === 'desktop' ? window.dshBall : null;
+  var stage = document.getElementById('stage');
+  var panel = document.getElementById('panel');
+  var grid = document.getElementById('grid');
+  var countEl = document.getElementById('count');
+  var modeEl = document.getElementById('mode');
+  var resetEl = document.getElementById('reset');
+  var toggleAllEl = document.getElementById('toggleAll');
+  var badgeEl = document.getElementById('badge');
+  var hintEl = document.getElementById('hint');
+  var menu = document.getElementById('menu');
+  var ballWrap = document.getElementById('ballWrap');
+
+  var PRIMARY = ['02', '03', '04', '19', '30', '31', '32', '33', '34', '35', '36', '40', '16', '11', '21', '10'];
+
+  var ball = null;
+  var current = null;
+  var state = { expanded: false, showAll: false, mode: 'auto', live: '02', hovering: false, settings: { gaze: true, theme: 'auto' } };
+
+  /* ---------------- 球球 ---------------- */
+  function ensure() {
+    if (ball) return ball;
+    try {
+      ball = window.EmotionBall.create(stage, { emotion: '02', shape: 'blob', label: 'emotion ball' });
+    } catch (error) {
+      console.error('[emotion-ball] 创建失败', error);
+      ball = null;
+    }
+    return ball;
+  }
+
+  function apply(emotionId, tip) {
+    if (typeof emotionId !== 'string' || !emotionId) return;
+    var engine = ensure();
+    if (!engine) return;
+    if (current === emotionId && !tip) return;
+    current = emotionId;
+    if (tip) engine.handleAIMessage({ emotionId: emotionId, tips: String(tip) });
+    else engine.setEmotion(emotionId);
+  }
+
+  window.__EB_SET = function (emotionId) {
+    apply(String(emotionId));
+  };
+
+  /* ---------------- 目录 ---------------- */
+  function catalog() {
+    var list = [];
+    var seed = window.EMOTION_SEED;
+    if (Array.isArray(seed)) {
+      seed.forEach(function (item) {
+        if (!item || typeof item.id !== 'string') return;
+        var en = item.en || {};
+        list.push({
+          id: item.id,
+          name: typeof item.name === 'string' ? item.name : item.id,
+          desc: typeof item.desc === 'string' ? item.desc : '',
+          group: typeof item.group === 'string' ? item.group : 'custom',
+        });
+      });
+    }
+    var groups = [];
+    var raw = window.EMOTION_GROUPS;
+    if (Array.isArray(raw)) {
+      raw.forEach(function (group) {
+        if (group && typeof group.key === 'string') {
+          groups.push({ key: group.key, name: group.name || group.key });
+        }
+      });
+    }
+    return { emotions: list, groups: groups };
+  }
+
+  function announce() {
+    try {
+      parent.postMessage({ type: 'dsh-emotion-ball:ready', emotions: catalog().emotions, groups: catalog().groups }, '*');
+    } catch (error) {
+      /* 不是 iframe 就算了 */
+    }
+  }
+
+  /* ---------------- 选择盘 ---------------- */
+  function renderGrid() {
+    var data = catalog();
+    var visible = data.emotions.filter(function (item) {
+      return state.showAll || PRIMARY.indexOf(item.id) >= 0;
+    });
+    countEl.textContent = visible.length + ' / ' + data.emotions.length;
+    grid.textContent = '';
+    data.groups.forEach(function (group) {
+      var members = visible.filter(function (item) { return item.group === group.key; });
+      if (!members.length) return;
+      var head = document.createElement('div');
+      head.className = 'group';
+      head.textContent = group.name;
+      grid.appendChild(head);
+      members.forEach(function (item) {
+        var cell = document.createElement('button');
+        cell.type = 'button';
+        cell.className = 'cell';
+        cell.textContent = item.name;
+        cell.dataset.id = item.id;
+        cell.dataset.active = item.id === state.live ? '1' : '0';
+        cell.addEventListener('mouseenter', function () {
+          state.hovering = true;
+          apply(item.id);
+          /* 原生 tooltip 在透明置顶窗里会延迟/卡住，改成面板内一行说明 */
+          hintEl.textContent = item.desc || item.name;
+        });
+        cell.addEventListener('click', function () {
+          state.hovering = false;
+          state.live = item.id;
+          apply(item.id);
+          markActive();
+          /* 告诉宿主进入手动模式；同源，无需 CORS */
+          fetch('/manual?id=' + encodeURIComponent(item.id)).catch(function () {});
+        });
+        grid.appendChild(cell);
+      });
+    });
+  }
+
+  function markActive() {
+    Array.prototype.forEach.call(grid.querySelectorAll('.cell'), function (cell) {
+      cell.dataset.active = cell.dataset.id === state.live ? '1' : '0';
+    });
+  }
+
+  function restoreLive() {
+    state.hovering = false;
+    apply(state.live);
+    hintEl.textContent = hintEl.dataset.default || '';
+  }
+
+  function setMode(mode) {
+    state.mode = mode;
+    modeEl.textContent = mode === 'manual' ? '手动' : '自动';
+    modeEl.dataset.manual = mode === 'manual' ? '1' : '0';
+    resetEl.disabled = mode !== 'manual';
+  }
+
+  /* 设置（眼神跟随 / 主题）——菜单里的勾选读这里。
+     注意要定义在外层：严格模式下 if 块里的函数声明是块级作用域。 */
+  function renderMarks() {
+    var lowMark = menu.querySelector('[data-mark="lowlatency"]');
+    if (lowMark) lowMark.textContent = state.settings.lowLatency ? '✓' : '';
+    var gazeMark = menu.querySelector('[data-mark="gaze"]');
+    if (gazeMark) gazeMark.textContent = state.settings.gaze ? '✓' : '';
+    ['auto', 'dark', 'light'].forEach(function (value) {
+      var mark = menu.querySelector('[data-mark="theme:' + value + '"]');
+      if (mark) mark.textContent = state.settings.theme === value ? '✓' : '';
+    });
+  }
+
+  /** 淡入：等窗口尺寸跳完的那一帧再加 class，否则过渡来不及跑（看起来就像硬切） */
+  function fadeIn(el) {
+    el.classList.remove('is-open');
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        el.classList.add('is-open');
+      });
+    });
+  }
+
+  function hideBadge() {
+    badgeEl.style.display = 'none';
+    badgeEl.dataset.kind = '';
+  }
+
+  function expand() {
+    if (state.expanded) return;
+    state.expanded = true;
+    menu.hidden = true;
+    menu.classList.remove('is-open');
+    panel.hidden = false;
+    renderGrid();
+    var height = Math.min(620, Math.ceil(panel.getBoundingClientRect().height));
+    if (bridge) bridge.expand({ width: 268, height: height });
+    fadeIn(panel);
+    /* 注意：点球不消角标。点球只是展开选择盘，不该算「已读」——
+       角标由主进程在 DSH 窗口重新获得焦点时清掉。 */
+  }
+
+  /** 右键菜单：同一套「窗口 = 内容 + 球」的展开机制，只是内容换成菜单。 */
+  function openMenu() {
+    state.expanded = true;
+    panel.hidden = true;
+    panel.classList.remove('is-open');
+    menu.hidden = false;
+    var height = Math.min(320, Math.ceil(menu.getBoundingClientRect().height));
+    if (bridge) bridge.expand({ width: 188, height: height });
+    fadeIn(menu);
+  }
+
+  /* 给自动化测试用的钩子（页面内部函数不在 window 上） */
+  window.__EB_OPEN_MENU = openMenu;
+  window.__EB_EXPAND = expand;
+
+  function collapse() {
+    if (!state.expanded) return;
+    state.expanded = false;
+    panel.hidden = true;
+    menu.hidden = true;
+    panel.classList.remove('is-open');
+    menu.classList.remove('is-open');
+    if (bridge) bridge.collapse();
+  }
+
+  function toggle() {
+    if (state.expanded) collapse();
+    else expand();
+  }
+
+  /* ------------- 事件 ------------- */
+  toggleAllEl.addEventListener('click', function () {
+    state.showAll = !state.showAll;
+    toggleAllEl.textContent = state.showAll ? '常用' : '全部';
+    renderGrid();
+    if (state.expanded) {
+      var height = Math.min(620, Math.ceil(panel.getBoundingClientRect().height));
+      if (bridge) bridge.expand({ width: 268, height: height });
+    }
+  });
+
+  resetEl.addEventListener('click', function () {
+    fetch('/manual?clear=1').catch(function () {});
+    setMode('auto');
+  });
+
+  panel.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') collapse();
+  });
+
+  /* 单击开合、双击拉 DSH：单击延迟 260ms（略大于常见双击间隔），第二下点击会取消它。
+     suppressClick：拖完手时浏览器仍会补一个 click，必须吃掉，否则拖一下就把面板关了。 */
+  var clickTimer = null;
+  var suppressClick = false;
+  var lastClickAt = 0;
+  ballWrap.addEventListener('click', function () {
+    if (suppressClick) {
+      suppressClick = false;
+      return;
+    }
+    var now = Date.now();
+    var isSecondClick = now - lastClickAt < 420;
+    lastClickAt = now;
+    /* 双击的第二下：把待定的单击撤掉，并直接返回——交给 dblclick 处理。
+       否则两下间隔超过 180ms 时，面板会先弹出来再被收掉（"闪一下"）。 */
+    if (isSecondClick) {
+      if (clickTimer) {
+        clearTimeout(clickTimer);
+        clickTimer = null;
+      }
+      return;
+    }
+    if (clickTimer) return;
+    clickTimer = setTimeout(function () {
+      clickTimer = null;
+      toggle();
+    }, 260);
+  });
+  ballWrap.addEventListener('dblclick', function () {
+    if (clickTimer) {
+      clearTimeout(clickTimer);
+      clickTimer = null;
+    }
+    collapse();
+    if (bridge) bridge.openDsh();
+  });
+
+  if (bridge) {
+    document.documentElement.dataset.surface = 'desktop';
+    bridge.onState(function (snapshot) {
+      if (!snapshot) return;
+      state.live = snapshot.emotion;
+      if (!state.hovering) apply(snapshot.emotion);
+      setMode(snapshot.mode || 'auto');
+      if (state.expanded) markActive();
+
+    });
+    bridge.onLeave(function () {
+      collapse();
+    });
+
+
+    bridge.onSettings(function (incoming) {
+      if (!incoming) return;
+      state.settings = {
+        gaze: incoming.gaze !== false,
+        theme: incoming.theme || 'auto',
+        lowLatency: incoming.lowLatency === true,
+      };
+      renderMarks();
+    });
+
+    /* 眼神跟随：主进程每 40ms 推一次「光标相对球心的方向」 */
+    bridge.onLayout(function (next) {
+      if (!next) return;
+      if (next.vertical === 'up' || next.vertical === 'down') document.documentElement.dataset.layout = next.vertical;
+      if (next.align === 'left' || next.align === 'right') document.documentElement.dataset.align = next.align;
+    });
+
+    bridge.onGaze(function (point) {
+      if (!state.settings.gaze || !point) return;
+      var engine = ensure();
+      if (engine) engine.setGaze(Number(point.x) || 0, Number(point.y) || 0);
+    });
+
+    window.__EB_BADGE = function (payload) {
+      if (!payload || !payload.kind) {
+        hideBadge();
+        return;
+      }
+      badgeEl.textContent = payload.text || '!';
+      badgeEl.dataset.kind = payload.kind;
+      badgeEl.style.display = 'block';
+    };
+
+    /* 角标：完成 / 出错 / 等你确认时亮一个小「!」；回到 DSH 窗口才会清掉 */
+    bridge.onBadge(function (payload) {
+      if (!payload || !payload.kind) {
+        hideBadge();
+        return;
+      }
+      badgeEl.textContent = payload.text || '!';
+      badgeEl.dataset.kind = payload.kind;
+      badgeEl.style.display = 'block';
+    });
+
+    menu.addEventListener('click', function (event) {
+      var button = event.target.closest('[data-act]');
+      if (!button) return;
+      var action = button.dataset.act;
+      if (action === 'gaze') {
+        bridge.setSetting('gaze', !state.settings.gaze);
+        state.settings.gaze = !state.settings.gaze;
+        renderMarks();
+        return;
+      }
+      if (action === 'lowlatency') {
+        var next = !state.settings.lowLatency;
+        state.settings.lowLatency = next;
+        bridge.setSetting('lowLatency', next);
+        renderMarks();
+        return;
+      }
+      if (action === 'theme') {
+        bridge.setSetting('theme', button.dataset.value);
+        return;
+      }
+    });
+
+    /* 拖动（只在小球上发起，面板里点击不拖动） */
+    var press = null;
+    ballWrap.addEventListener('pointerdown', function (event) {
+      if (event.button !== 0) return;
+      press = { x: event.screenX, y: event.screenY, moved: false };
+      bridge.dragStart();
+    });
+    window.addEventListener('pointermove', function (event) {
+      if (!press) return;
+      var dx = event.screenX - press.x;
+      var dy = event.screenY - press.y;
+      if (!press.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+      press.moved = true;
+      bridge.dragTo(dx, dy);
+    });
+    window.addEventListener('pointerup', function () {
+      if (!press) return;
+      var moved = press.moved;
+      press = null;
+      bridge.dragEnd();
+      if (moved) {
+        /* 拖动结束不算点击：既取消待定的单击，也吃掉随后补发的 click */
+        if (clickTimer) {
+          clearTimeout(clickTimer);
+          clickTimer = null;
+        }
+        suppressClick = true;
+        setTimeout(function () { suppressClick = false; }, 350);
+      }
+    });
+    ballWrap.addEventListener('contextmenu', function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      openMenu();
+    });
+    window.addEventListener('contextmenu', function (event) {
+      event.preventDefault();
+    });
+  } else {
+    window.addEventListener('message', function (event) {
+      var data = event.data;
+      if (!data || typeof data !== 'object') return;
+      if (data.type === 'emotion') apply(data.emotionId, data.tip);
+      else if (data.type === 'gaze') {
+        var engine = ensure();
+        if (engine) engine.setGaze(Number(data.x) || 0, Number(data.y) || 0);
+      } else if (data.type === 'gaze-off') {
+        var idle = ensure();
+        if (idle) idle.clearGaze();
+      } else if (data.type === 'sync') announce();
+    });
+  }
+
+  /* 只挂一次：每次 renderGrid 都挂会累加监听 */
+  grid.addEventListener('mouseleave', restoreLive);
+
+  renderMarks();
+  ensure();
+  setMode('auto');
+  try {
+    var initial = new URLSearchParams(location.search).get('emotion');
+    if (initial) apply(initial);
+  } catch (error) {
+    /* 忽略 */
+  }
+  if (!bridge) announce();
+})();
+</script>
+</body>
+</html>
