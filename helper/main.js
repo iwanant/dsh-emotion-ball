@@ -57,6 +57,8 @@ let leaveTimer = null;
 let targetSize = { width: BALL_SIZE, height: BALL_SIZE };
 /** 灞曞紑鏂瑰悜锛氱悆鍦ㄤ笅鏂规椂鍐呭鏈濅笂锛坲p锛夛紝鐞冨湪涓婃柟鏃跺唴瀹规湞涓嬶紙down锛夈€?*/
 let layout = 'up';
+/** 球的基准位置（DIP）。所有展开/收起都从它算，避免反复推导时逐次漂移。 */
+let ballAnchor = null;
 /** 姘村钩閿氱偣锛歳ight = 鐞冨湪绐楀彛鍙宠竟锛堥潰鏉挎湞宸﹀睍寮€锛夛紝left = 缈诲埌鍙︿竴渚с€?*/
 let panelAlign = 'right';
 
@@ -106,7 +108,7 @@ function themeName() {
 }
 
 function ballUrl() {
-  return `${ORIGIN}/ball.html?surface=desktop&theme=${themeName()}&v=9`;
+  return `${ORIGIN}/ball.html?surface=desktop&theme=${themeName()}&v=10`;
 }
 
 function readPosition() {
@@ -149,15 +151,85 @@ function clampToDisplays(point, size) {
   };
 }
 
-/** 璁板繂鐨勬槸**鐞?*鐨勫乏涓婅锛屼笉鏄獥鍙ｅ師鐐光€斺€斿睍寮€鏃剁獥鍙ｅ師鐐规槸闈㈡澘宸︿笂瑙掋€?*/
+/**
+ * 把窗口坐标对齐到「乘缩放比之后是整数」的网格。
+ *
+ * Electron 的 content bounds 是整数 DIP：150% 缩放下 657 DIP = 985.5 物理像素，
+ * 系统会进位成 986 → 读回来变成 658 DIP，于是球每次切换面板都挪 1px。
+ * 做法：把缩放比写成分数 p/q（1.5 = 3/2），要求坐标是 q 的整数倍，物理像素就一定是整数。
+ */
+/**
+ * 把窗口放到「球正好落在 ball（球左上角）」的位置。
+ *
+ * 不跟 DPI 取整硬碰：设完窗读回一次，量出球实际落在哪，差多少补多少。
+ * 150% 缩放下 657 DIP 会被系统进位成 986 物理像素（= 658 DIP），
+ * 这种偏差补一次就归位，而且是幂等的——反复展开/收起不会累积。
+ */
+function placeWindowForBall(ball, width, height, vertical, align) {
+  if (!win || win.isDestroyed() || !ball) return;
+  const boxWidth = Math.max(BALL_SIZE, width);
+  const boxHeight = Math.max(BALL_SIZE, height);
+  const compute = (anchor, w, h) => {
+    const x = align === 'left' ? anchor.x : anchor.x + BALL_SIZE - w;
+    const y = vertical === 'up' ? anchor.y + BALL_SIZE - h : anchor.y;
+    return { x: Math.round(x), y: Math.round(y) };
+  };
+  const actual = () => {
+    const b = win.getContentBounds();
+    return {
+      x: panelAlign === 'left' ? b.x : b.x + b.width - BALL_SIZE,
+      y: layout === 'up' ? b.y + b.height - BALL_SIZE : b.y,
+    };
+  };
+
+  const first = compute(ball, boxWidth, boxHeight);
+  win.setContentBounds({ x: first.x, y: first.y, width: boxWidth, height: boxHeight });
+
+  const got = actual();
+  const dx = got.x - ball.x;
+  const dy = got.y - ball.y;
+  if (dx || dy) {
+    const second = compute(
+      { x: ball.x, y: ball.y },
+      boxWidth,
+      boxHeight,
+    );
+    win.setContentBounds({ x: second.x - dx, y: second.y - dy, width: boxWidth, height: boxHeight });
+  }
+}
+
+function coordinateStep(scale) {
+  const value = scale && scale > 1 ? scale : 1;
+  for (let q = 1; q <= 8; q += 1) {
+    if (Math.abs(value * q - Math.round(value * q)) < 1e-6) return q;
+  }
+  return 1;
+}
+
+/** 把坐标吸附到最近的合法网格点（保持整数 DIP）。 */
+function snapToPixels(value, scale) {
+  const q = coordinateStep(scale);
+  if (q <= 1) return Math.round(value);
+  return Math.round(value / q) * q;
+}
+
+/** 指定位置所在显示器的缩放比。 */
+function displayScale(x, y) {
+  try {
+    return screen.getDisplayNearestPoint({ x: Math.round(Number(x) || 0), y: Math.round(Number(y) || 0) }).scaleFactor || 1;
+  } catch {
+    return 1;
+  }
+}
+
 function ballPosition() {
   if (!win || win.isDestroyed()) return null;
   const bounds = win.getContentBounds();
   /* 绐楀彛鍐呭姣旂悆澶у嚭涓€鐐癸紙閫忔槑绐楃殑杈圭紭锛夛紝鐞冨湪椤甸潰閲屾槸闈犲彸涓嬭瀵归綈鐨勶紝
      鎵€浠ユ敹璧锋椂涔熶笉鑳界洿鎺ユ嬁绐楀彛鍘熺偣褰撶悆鐨勪綅缃紝鍚﹀垯灞曞紑浼氬亸鍑犱釜鍍忕礌銆?*/
   return {
-    x: panelAlign === 'left' ? Math.round(bounds.x) : Math.round(bounds.x + bounds.width - BALL_SIZE),
-    y: layout === 'up' ? Math.round(bounds.y + bounds.height - BALL_SIZE) : Math.round(bounds.y),
+    x: Math.round(panelAlign === 'left' ? bounds.x : bounds.x + bounds.width - BALL_SIZE),
+    y: Math.round(layout === 'up' ? bounds.y + bounds.height - BALL_SIZE : bounds.y),
   };
 }
 
@@ -800,7 +872,15 @@ function createWindow() {
       expanded = false;
       layout = 'up';
       targetSize = { width: BALL_SIZE, height: BALL_SIZE };
-      if (ball) win.setContentBounds({ x: ball.x, y: ball.y, width: BALL_SIZE, height: BALL_SIZE });
+      if (ball) {
+    const scale = displayScale(ball.x, ball.y);
+    win.setContentBounds({
+      x: snapToPixels(ball.x, scale),
+      y: snapToPixels(ball.y, scale),
+      width: snapToPixels(BALL_SIZE, scale),
+      height: snapToPixels(BALL_SIZE, scale),
+    });
+  }
       if (badgeOn) sendBadge({ kind: lastBadgeKind || 'done', text: badgeText(lastBadgeKind) });
     }
     startPolling();
@@ -846,10 +926,17 @@ ipcMain.on('ball:drag-to', (_event, dx, dy) => {
     targetSize,
   );
   /* 灏哄姘歌繙鍐?targetSize 杩欎釜甯搁噺锛歴etPosition 浼氶噸濂?DWM 杈规锛?     鑰屼粠 getBounds 璇诲洖灏哄鍐嶅啓浼氬湪 DPI 缂╂斁涓嬫紓绉汇€?*/
-  win.setContentBounds({ x: next.x, y: next.y, width: targetSize.width, height: targetSize.height });
+  const dragScale = displayScale(next.x, next.y);
+  win.setContentBounds({
+    x: snapToPixels(next.x, dragScale),
+    y: snapToPixels(next.y, dragScale),
+    width: targetSize.width,
+    height: targetSize.height,
+  });
 });
 
 ipcMain.on('ball:drag-end', () => {
+  ballAnchor = null; // 位置变了：下次以实际窗口为准
   if (win && !win.isDestroyed()) savePosition(ballPosition());
   dragState = null;
 });
@@ -961,10 +1048,21 @@ ipcMain.on('ball:expand', (_event, size) => {
   const height = Math.max(120, Math.round(Number(size && size.height) || panelSize.height));
   panelSize = { width, height };
   const bounds = win.getContentBounds();
-  /* 鐞冪殑灞忓箷浣嶇疆锛歶p 鏃跺湪绐楀彛鍙充笅瑙掞紝down 鏃跺湪鍙充笂瑙掞紱宸﹀彸鍚岀悊銆?*/
-  const ballRight = bounds.x + bounds.width;
+  /* 有基准就用基准：反复「面板 ↔ 菜单」切换时位置才不会一圈一圈地挪。 */
+  if (!ballAnchor) {
+    ballAnchor = {
+      x: panelAlign === 'left' ? bounds.x : bounds.x + bounds.width - BALL_SIZE,
+      y: layout === 'up' ? bounds.y + bounds.height - BALL_SIZE : bounds.y,
+    };
+  }
+  const rawRight = ballAnchor.x + BALL_SIZE;
+  const rawTop = ballAnchor.y;
+  /* 先把手里的球位置吸附到物理像素网格：当前窗口可能落在半像素上
+     （比如 505 DIP = 757.5 物理像素），不吸附的话从它推出的新位置会偏 1 物理像素。 */
+  const ballScale = displayScale(rawRight - BALL_SIZE, rawTop);
+  const ballRight = snapToPixels(rawRight, ballScale);
   const ballLeft = ballRight - BALL_SIZE;
-  const ballTop = layout === 'up' ? bounds.y + bounds.height - BALL_SIZE : bounds.y;
+  const ballTop = snapToPixels(rawTop, ballScale);
   const area = screen.getDisplayNearestPoint({ x: ballLeft, y: ballTop }).workArea;
   const boxWidth = Math.max(BALL_SIZE, width);
 
@@ -987,12 +1085,8 @@ ipcMain.on('ball:expand', (_event, size) => {
     }
   }
 
-  const next = {
-    x,
-    y,
-    width: boxWidth,
-    height: (up ? height : height) + 8 + BALL_SIZE,
-  };
+  const nextWidth = boxWidth;
+  const nextHeight = height + 8 + BALL_SIZE;
   if (!win.isDestroyed()) {
     try {
       win.webContents.send('ball:layout', { vertical: layout, align });
@@ -1002,10 +1096,11 @@ ipcMain.on('ball:expand', (_event, size) => {
   }
   expanded = true;
   panelAlign = align;
-  targetSize = { width: next.width, height: next.height };
+  targetSize = { width: nextWidth, height: nextHeight };
   clearLeaveTimer();
-  logInput('expand to ' + JSON.stringify(next) + ' layout=' + layout + '/' + align);
-  win.setContentBounds(next);
+  logInput('expand to ' + nextWidth + 'x' + nextHeight + ' layout=' + layout + '/' + align);
+  /* 以基准球位置为准放置窗口，多退少补（见 placeWindowForBall） */
+  placeWindowForBall({ x: ballLeft, y: ballTop }, nextWidth, nextHeight, layout, align);
 });
 
 ipcMain.on('ball:collapse', () => {
@@ -1016,7 +1111,8 @@ ipcMain.on('ball:collapse', () => {
   panelAlign = 'right';
   targetSize = { width: BALL_SIZE, height: BALL_SIZE };
   logInput('collapse');
-  if (ball) win.setContentBounds({ x: ball.x, y: ball.y, width: BALL_SIZE, height: BALL_SIZE });
+  ballAnchor = null; // 收起后以真实位置为准
+  if (ball) placeWindowForBall(ball, BALL_SIZE, BALL_SIZE, 'up', 'right');
 });
 
 /** 灏忕悆 / 闈㈡澘鐨勫睆骞曠煩褰紝鐢ㄤ簬鍛戒腑妫€娴嬨€?*/
@@ -1094,7 +1190,7 @@ function startHitTest() {
 ipcMain.on('ball:theme', (_event, theme) => {
   if (theme === 'dark' || theme === 'light') {
     /* 璋冭壊鏉挎槸寮曟搸娉ㄥ唽鍓嶆敼鐨勭瀛愶紝鍙兘閲嶈浇椤甸潰锛涢噸杞藉悗 did-finish-load 浼氶噸鏂版媺鐘舵€?*/
-    if (win && !win.isDestroyed()) win.loadURL(`${ORIGIN}/ball.html?surface=desktop&theme=${theme}&v=9`);
+    if (win && !win.isDestroyed()) win.loadURL(`${ORIGIN}/ball.html?surface=desktop&theme=${theme}&v=10`);
   }
 });
 
@@ -1192,6 +1288,39 @@ if (!app.requestSingleInstanceLock()) {
     }
 
     /* --paneltest=1锛氬睍寮€ 鈫?鍒囥€屽叏閮ㄣ€嶁啋 鐪嬬悆鏈夋病鏈夎窇浣?*/
+    /* --ctxmenutest=1：面板打开时右键，看球是否位移 */
+    if (DEV_MODE && args.get('ctxmenutest') !== undefined) {
+      setTimeout(async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const snap = (label) => {
+          const b = win.getContentBounds();
+          const ball = ballPosition();
+          console.log(label + ' window=' + JSON.stringify(b) + ' ball=' + JSON.stringify(ball) + ' layout=' + layout + '/' + panelAlign);
+          return ball;
+        };
+        await sleep(700);
+        await win.webContents.executeJavaScript('window.__EB_EXPAND()', true);
+        await sleep(500);
+        const a = snap('panel-open');
+        await win.webContents.executeJavaScript('window.__EB_OPEN_MENU()', true);
+        await sleep(600);
+        const b = snap('menu-open');
+        await win.webContents.executeJavaScript('window.__EB_EXPAND()', true);
+        await sleep(500);
+        const c = snap('back-to-panel');
+        await win.webContents.executeJavaScript('window.__EB_COLLAPSE && window.__EB_COLLAPSE()', true);
+        await sleep(500);
+        const d = snap('collapsed');
+        console.log(JSON.stringify({
+          cycleStable: a.x === b.x && a.y === b.y && a.x === c.x && a.y === c.y,
+          finalBall: d,
+          startBall: a,
+        }, null, 2));
+        console.log(JSON.stringify({ movedOnMenu: a.x !== b.x || a.y !== b.y, dx: b.x - a.x, dy: b.y - a.y }, null, 2));
+        app.exit(0);
+      }, 1800);
+    }
+
     if (DEV_MODE && args.get('paneltest') !== undefined) {
       setTimeout(async () => {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1278,7 +1407,7 @@ if (!app.requestSingleInstanceLock()) {
 
     nativeTheme.on('updated', () => {
       if (!win || win.isDestroyed()) return;
-      win.loadURL(`${ORIGIN}/ball.html?surface=desktop&theme=${themeName()}&v=9`);
+      win.loadURL(`${ORIGIN}/ball.html?surface=desktop&theme=${themeName()}&v=10`);
     });
 
     if (probePath) {
