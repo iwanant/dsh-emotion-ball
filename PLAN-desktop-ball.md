@@ -114,3 +114,36 @@ dsh-emotion-ball/
   所以「面板 → 菜单」切换会让球挪 1px；吸附坐标治不了（反而变成 2px）。
   正解是设完窗口**读回实测球的位置、差多少补多少**，并记住球的基准位置（`ballAnchor`），
   反复开合不累积。自检：`--ctxmenutest=1` 应输出 `cycleStable: true`。
+
+## 双击延迟：把 PowerShell 换成系统自带 csc 编译的小 exe（0.4.0）
+
+问题：双击球之后 DSH 要愣一下才动。实测冷启动 3966ms、热启动 247ms。
+
+拆开看，慢的不是 Win32 调用，是「起一个 PowerShell 进程」这件事本身：
+
+| 环节 | 耗时 |
+|---|---|
+| PowerShell 空启动 | 594ms |
+| 里面再 `Add-Type` 编译 C# | +891ms |
+| `GetProcessesByName` 找 DSH 窗口 | 200–400ms |
+| 真正的 ShowWindow / SetForegroundWindow | 个位数 ms |
+
+三个决定：
+
+1. **不再用 PowerShell**。新增 `helper/toggle-helper.cs`，首次运行时调用系统自带的
+   `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe` 现场编译成约 12KB 的
+   `toggle-helper.exe`（带版本号命名，重新编译不会撞上正在运行的旧文件），之后常驻。
+   内存约 3MB，比 PowerShell 的 73MB 更省。协议不变：stdin 发 `focus` / `toggle` / `show`，
+   stdout 回 `focus=0|1` / `ok minimize|raise|none`，所以 main.js 那侧的改动很小。
+2. **缓存窗口句柄**。`GetProcessesByName("DeepSeek Harness")` 在这台机器上枚举不全
+   （6 个进程只返回 2 个、`MainWindowHandle` 全是 0），改用 `EnumWindows` + 
+   `GetWindowThreadProcessId` 一次找出真正的 DSH 窗口，然后缓存句柄；子进程重启时
+   句柄自动失效重取，窗口关闭也能识别。
+3. **双击的占位角标删了**。原来冷启动要 300–400ms，怕用户以为没点上，会先闪一个「…」。
+   现在 60ms 就完成，那个占位反而变成噪音。
+
+结果：最小化 60–70ms，被遮挡时置顶唤醒约 140ms，托盘恢复约 215ms。
+
+教训：**先测再优化**。一开始猜是 `SetForegroundWindow` 被 Windows 前台锁拦住，
+差点去写 `AttachThreadInput` 那套偏方；实际掐完时间发现真正的大头是「起进程」，
+换掉进程模型就一步到位了。

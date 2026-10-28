@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('dshBall', {
   dragTo: (dx, dy) => ipcRenderer.send('ball:drag-to', dx, dy),
   dragEnd: () => ipcRenderer.send('ball:drag-end'),
   openDsh: () => ipcRenderer.send('ball:open-dsh'),
+  /* 提前把后台 PowerShell 拉起来，消掉双击的冷启动延迟 */
+  warm: () => ipcRenderer.send('ball:warm'),
   expand: (size) => ipcRenderer.send('ball:expand', size),
   collapse: () => ipcRenderer.send('ball:collapse'),
   resetPosition: () => ipcRenderer.send('ball:reset-position'),

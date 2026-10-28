@@ -162,6 +162,8 @@ function startDesktopBall(electron) {
   const helperDir = path.join(HERE, 'helper');
   const dshExe = resolveDshExe();
   const argv = [helperDir];
+  /* 调试开关：仅在 DSH_EMOTION_BALL_DEV=1 时打开，平时不带 */
+  if (process.env.DSH_EMOTION_BALL_DEV === '1') argv.push('--dev=1');
   if (dshExe) argv.push(`--dsh-exe=${dshExe}`);
 
   try {

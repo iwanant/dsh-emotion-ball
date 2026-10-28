@@ -8,7 +8,7 @@
 const { app, BrowserWindow, ipcMain, nativeTheme, screen } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 const PORT = 8766;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
@@ -63,7 +63,7 @@ let ballAnchor = null;
 let panelAlign = 'right';
 
 /** 鐢ㄦ埛璁剧疆锛氱溂绁炶窡闅?+ 涓婚鍋忓ソ銆傚瓨 userData/settings.json銆?*/
-let settings = { gaze: true, theme: 'auto', lowLatency: false, lastFocus: null };
+let settings = { gaze: true, theme: 'auto', lowLatency: true, lastFocus: null };
 let settingsFile = null;
 const GAZE_RADIUS = 260;
 
@@ -74,7 +74,7 @@ function readSettings() {
       settings = {
         gaze: parsed.gaze !== false,
         theme: parsed.theme === 'dark' || parsed.theme === 'light' ? parsed.theme : 'auto',
-        lowLatency: parsed.lowLatency === true,
+        lowLatency: parsed.lowLatency !== false,
         lastFocus: typeof parsed.lastFocus === 'boolean' ? parsed.lastFocus : null,
       };
     }
@@ -108,7 +108,7 @@ function themeName() {
 }
 
 function ballUrl() {
-  return `${ORIGIN}/ball.html?surface=desktop&theme=${themeName()}&v=10`;
+  return `${ORIGIN}/ball.html?surface=desktop&theme=${themeName()}&v=11`;
 }
 
 function readPosition() {
@@ -486,12 +486,9 @@ function sendBadge(payload) {
  * Node 娌℃湁鍘熺敓 Win32锛屾墍浠ュ€?PowerShell 璋?user32銆備絾**姣忔鍙屽嚮鍐峰惎鍔ㄤ竴娆? * PowerShell锛堣繕瑕佺幇鍦虹紪璇?C#锛夎 300~400ms**锛屾墜鎰熷緢宸€? * 鎵€浠ヨ繖閲屾敼鎴愶細绗竴娆＄敤鍒版椂璧蜂竴涓?*甯搁┗**鐨?PowerShell锛屼箣鍚庡弻鍑诲彧寰€瀹?stdin
  * 鍐欎竴琛?"toggle"锛屽欢杩熼檷鍒板嚑鍗佹绉掋€? */
 const DSH_TOGGLE_PS = [
-  /* 注意：这个脚本里**不要写中文注释**。
-     PowerShell 5 按 ANSI 读无 BOM 的 .ps1，中文会被解成乱码，
-     甚至把换行吃掉、让下一行代码并进注释（踩过两次）。 */
+  /* ASCII comments only: PowerShell 5 reads BOM-less .ps1 as ANSI and mangles Chinese,
+     which has silently eaten newlines and broken this script twice. */
   '$ErrorActionPreference = "SilentlyContinue"',
-  '# kill stale instances left by a force-killed helper',
-  `Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*dsh-toggle-loop.ps1*' -and $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`,
   'Add-Type -TypeDefinition @"',
   'using System;',
   'using System.Runtime.InteropServices;',
@@ -501,6 +498,7 @@ const DSH_TOGGLE_PS = [
   '  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);',
   '  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);',
   '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);',
+  '  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);',
   '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);',
   '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
   '  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);',
@@ -513,32 +511,40 @@ const DSH_TOGGLE_PS = [
   '  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);',
   '}',
   '"@',
+  '# Cache the window handle: enumerating processes on every poll costs 100-300ms,',
+  '# and the focus poll runs a few times per second, so it used to dominate the lag.',
+  '$script:winH = [IntPtr]::Zero',
+  'function Resolve-DshWindow {',
+  '  if ($script:winH -ne [IntPtr]::Zero -and [EBW32]::IsWindow($script:winH)) { return $script:winH }',
+  '  $proc = [System.Diagnostics.Process]::GetProcessesByName("DeepSeek Harness") | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1',
+  '  if ($null -eq $proc) { $script:winH = [IntPtr]::Zero } else { $script:winH = $proc.MainWindowHandle }',
+  '  return $script:winH',
+  '}',
+  '# ready as early as possible: everything slow happens after this line',
   '[Console]::Out.WriteLine("ready")',
   '[Console]::Out.Flush()',
+  '# kill stale instances left behind by a force-killed helper (slow, so keep it off the start path)',
+  `Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*dsh-toggle-loop.ps1*' -and $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`,
   'while ($true) {',
   '  $line = [Console]::In.ReadLine()',
   '  if ($null -eq $line) { break }',
   '  $cmd = $line.Trim()',
   '  if ($cmd -ne "toggle" -and $cmd -ne "focus") { continue }',
-  '  $p = [System.Diagnostics.Process]::GetProcessesByName("DeepSeek Harness") | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1',
+  '  $h = Resolve-DshWindow',
   '  if ($cmd -eq "focus") {',
-  '    $isFg = ($null -ne $p) -and ($p.MainWindowHandle -eq [EBW32]::GetForegroundWindow())',
+  '    $isFg = ($h -ne [IntPtr]::Zero) -and ($h -eq [EBW32]::GetForegroundWindow())',
   '    [Console]::Out.WriteLine("focus=" + [int]$isFg)',
   '    [Console]::Out.Flush()',
   '    continue',
   '  }',
-  '  if (-not $p) {',
+  '  if ($h -eq [IntPtr]::Zero) {',
   '    if ($env:EB_DSH_EXE) { Start-Process $env:EB_DSH_EXE }',
   '    [Console]::Out.WriteLine("ok none")',
   '    [Console]::Out.Flush()',
   '    continue',
   '  }',
-  '  $h = $p.MainWindowHandle',
-  '  # Decide by occlusion, not by foreground: overlays such as dsh-pet constantly',
-  '  # steal the foreground, so "is DSH foreground" is false even while you look at it.',
-  '  # Hit-test the centre of the DSH window:',
-  '  #   centre belongs to DSH  -> you can see it -> minimise',
-  '  #   centre belongs to another window, or window is minimised/hidden -> raise it',
+  '  # Decide by occlusion, not by foreground: overlay widgets (dsh-pet) keep stealing',
+  '  # the foreground, so "is DSH foreground" is false even while you look at it.',
   '  $visible = $false',
   '  if ([EBW32]::IsWindowVisible($h) -and -not [EBW32]::IsIconic($h)) {',
   '    $rc = New-Object EBRECT',
@@ -601,8 +607,15 @@ function askFocus(proc, timeoutMs = 400) {
   });
 }
 let toggleIdleTimer = null;
-/** 用完后保活 3 分钟：连续操作不用反复冷启动，闲着就把 73MB 还回去。 */
-const TOGGLE_IDLE_MS = 3 * 60 * 1000;
+/**
+ * 常驻：双击必须永远是热的。
+ * 焦点轮询每秒都要问一次 PowerShell，本来就会把它一直拉起来；
+ * 再按「空闲 10 分钟退出」去杀它，只会制造 1.3s 的冷启动竞态——杀了下一拍又要重启。
+ * 所以这里不再自动退出，PowerShell 只随 helper 一起结束。
+ */
+function touchToggleIdle() {
+  /* 有意留空：保留调用点，方便以后真的需要按需退出时改回来。 */
+}
 /** DSH 是否是前台窗口；常驻 PowerShell 每 1s 报一次（getForegroundWindow 比较）。 */
 let dshForeground = null;
 let focusPollTimer = null;
@@ -638,37 +651,90 @@ function startFocusPolling() {
   }, 1000);
 }
 /**
- * 甯稿紑锛氫笉鍋氱┖闂查€€鍑猴紙鐢ㄦ埛瑕佹眰鍙屽嚮姘歌繙绉掑搷搴旓級銆? * 甯搁┗鐨?PowerShell 绾?80MB锛屽彧鍦?helper 鑷繁閫€鍑烘椂鐢?stopToggleProc 鏀舵帀锛? * 鑻ヤ笂娆¤寮烘潃鐣欎笅娈嬬暀锛屾柊瀹炰緥鍚姩鏃惰剼鏈紑澶寸殑鑷剤浼氭竻鎺夊悓鍚嶈繘绋嬨€? */
+  * 常驻：双击必须永远是热的。焦点轮询每秒都要问一次 PowerShell，
+  * 本来就会把它一直拉起来；再按「空闲 10 分钟退出」去杀它，
+  * 只会制造 1.3s 的冷启动竞态——杀了下一拍又要重启。这里不再自动退出。
+  */
 function touchToggleIdle() {
-  if (settings.lowLatency) return; // 低延迟模式：常驻，不自动退出
-  if (toggleIdleTimer) clearTimeout(toggleIdleTimer);
-  toggleIdleTimer = setTimeout(() => {
-    toggleIdleTimer = null;
-    stopToggleProc();
-  }, TOGGLE_IDLE_MS);
+  /* 有意留空：保留调用点，方便以后真需要按需退出时改回来。 */
 }
 
 /** 鎳掑惎鍔ㄥ父椹?PowerShell锛堢涓€娆″弻鍑讳細鎱竴鐐癸紝涔嬪悗涓€鐩存槸鐑殑锛夈€?*/
+/**
+ * 把 helper/toggle-helper.cs 编译成一个小 exe（用系统自带的 csc.exe，不需要装 .NET SDK）。
+ * 冷启动约 40ms、常驻约 12MB；编不出来就返回 null，退回 PowerShell 方案。
+ */
+function ensureToggleExe() {
+  const sourceFile = path.join(__dirname, 'toggle-helper.cs');
+  if (!fs.existsSync(sourceFile)) return null;
+  let stamp = 0;
+  try {
+    stamp = Math.round(fs.statSync(sourceFile).mtimeMs);
+  } catch {
+    return null;
+  }
+  /* 文件名带版本号：exe 正在运行时自己无法被覆盖，换个名字编译就不会撞锁 */
+  const target = path.join(app.getPath('userData'), `dsh-toggle-helper-${stamp}.exe`);
+  if (fs.existsSync(target)) return target;
+  const compiler = [
+    'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe',
+    'C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319\\csc.exe',
+  ].find((item) => fs.existsSync(item));
+  if (!compiler) return null;
+  try {
+    const result = spawnSync(compiler, ['/nologo', '/target:exe', '/optimize+', '/out:' + target, sourceFile], {
+      windowsHide: true,
+      timeout: 30000,
+      encoding: 'utf8',
+    });
+    if (result.status !== 0 || !fs.existsSync(target)) {
+      logInput('toggle-helper 编译失败: ' + String(result.stderr || result.stdout || '').slice(0, 160));
+      return null;
+    }
+    /* 编好之后顺手清掉旧版本 */
+    const current = path.basename(target);
+    for (const name of fs.readdirSync(app.getPath('userData'))) {
+      if (/^dsh-toggle-helper-\d+\.exe$/.test(name) && name !== current) {
+        try {
+          fs.unlinkSync(path.join(app.getPath('userData'), name));
+        } catch {
+          /* 旧版本还在跑就下次再删 */
+        }
+      }
+    }
+    return target;
+  } catch (error) {
+    logInput('toggle-helper 编译异常: ' + error.message);
+    return null;
+  }
+}
+
 function ensureToggleProc() {
   if (toggleProc && toggleProc.exitCode === null) return toggleProc;
   /* 冷启动没有「刚才」，先用上次持久化的焦点状态，避免第一次双击判错方向 */
   if (typeof settings.lastFocus === 'boolean') dshForeground = settings.lastFocus;
   try {
-    /* 蹇呴』钀界洏鐢?-File 璺戯細鎶婂甫 here-string 鐨勫琛岃剼鏈杩?-Command锛?       PowerShell 瑙ｆ瀽涓嶄簡锛圓dd-Type 闈欓粯澶辫触锛岀粨鏋滃弻鍑绘鏃犲弽搴旓級銆?*/
-    const scriptFile = path.join(app.getPath('userData'), 'dsh-toggle-loop.ps1');
-    try {
-      fs.writeFileSync(scriptFile, DSH_TOGGLE_PS);
-    } catch {
-      return null;
-    }
-    toggleProc = spawn(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptFile],
-      {
-        windowsHide: true,
-        env: { ...process.env, EB_DSH_EXE: dshExe || args.get('dsh-exe') || '' },
-      },
-    );
+    /* PowerShell 兜底时脚本必须落盘用 -File 跑：带 here-string 的多行脚本塞进 -Command，
+       PowerShell 解析不了（Add-Type 静默失败，结果双击毫无反应）。 */
+    const helperExe = ensureToggleExe();
+    if (helperExe) {
+      toggleProc = spawn(helperExe, [dshExe || args.get('dsh-exe') || ''], { windowsHide: true });
+    } else {
+      const scriptFile = path.join(app.getPath('userData'), 'dsh-toggle-loop.ps1');
+      try {
+        fs.writeFileSync(scriptFile, DSH_TOGGLE_PS);
+      } catch {
+        return null;
+      }
+      toggleProc = spawn(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptFile],
+        {
+          windowsHide: true,
+          env: { ...process.env, EB_DSH_EXE: dshExe || args.get('dsh-exe') || '' },
+        },
+      );
+      }
     toggleProc.stdout.on('data', (chunk) => {
       const text = String(chunk);
       /* focus=1 / focus=0：常驻 PowerShell 报的「DSH 是不是前台窗口」 */
@@ -718,16 +784,7 @@ function ensureToggleProc() {
 }
 
 async function toggleDshWindow() {
-  const cold = !toggleProc || toggleProc.exitCode !== null;
   const proc = ensureToggleProc();
-  /* 冷启动要 300-400ms：先亮一个「…」给手反馈，1.2 秒后按真实状态收掉 */
-  if (cold && proc) {
-    sendBadge({ kind: 'pending', text: '…' });
-    setTimeout(() => {
-      if (badgeOn) sendBadge({ kind: lastBadgeKind || 'done', text: badgeText(lastBadgeKind) });
-      else sendBadge(null);
-    }, 1200);
-  }
   touchToggleIdle();
   if (!proc) {
     openDsh();
@@ -1042,6 +1099,14 @@ function pushGaze(cursor) {
 
 /**
  * 灞曞紑 / 鏀惰捣锛氱獥鍙?= 鐞?+ 闈㈡澘 鐨勫苟闆嗭紝骞朵繚璇?*鐞冪殑灞忓箷浣嶇疆涓嶅姩**銆? * 骞堕泦蹇呯劧鏈夈€岀┖鐧借钀姐€嶏紝鎵€浠ョ獥鍙ｄ笉鑳芥暣鍧楀悆榧犳爣鈥斺€? * 鐢变富杩涚▼鎸夊厜鏍囦綅缃仛鍛戒腑妫€娴嬶紝鍙湪灏忕悆/闈㈡澘涓婅В闄?setIgnoreMouseEvents銆? */
+/* 悬停/按下时提前把 PowerShell 拉起来：等用户真正双击时它已经就绪，
+   冷启动那 0.6-1.3 秒就藏在了"手还没点下去"的时间里。 */
+ipcMain.on('ball:warm', () => {
+  if (!win || win.isDestroyed()) return;
+  if (toggleProc && toggleProc.exitCode === null) return;
+  ensureToggleProc();
+});
+
 ipcMain.on('ball:expand', (_event, size) => {
   if (!win || win.isDestroyed()) return;
   const width = Math.max(180, Math.round(Number(size && size.width) || panelSize.width));
@@ -1190,7 +1255,7 @@ function startHitTest() {
 ipcMain.on('ball:theme', (_event, theme) => {
   if (theme === 'dark' || theme === 'light') {
     /* 璋冭壊鏉挎槸寮曟搸娉ㄥ唽鍓嶆敼鐨勭瀛愶紝鍙兘閲嶈浇椤甸潰锛涢噸杞藉悗 did-finish-load 浼氶噸鏂版媺鐘舵€?*/
-    if (win && !win.isDestroyed()) win.loadURL(`${ORIGIN}/ball.html?surface=desktop&theme=${theme}&v=10`);
+    if (win && !win.isDestroyed()) win.loadURL(`${ORIGIN}/ball.html?surface=desktop&theme=${theme}&v=11`);
   }
 });
 
@@ -1212,18 +1277,19 @@ if (!app.requestSingleInstanceLock()) {
     readSettings();
     createWindow();
 
-    /* 绌洪棽鏃堕鐑父椹?PowerShell锛氬弻鍑荤涓€娆′篃涓嶇敤绛夊喎鍚姩 */
+    /* 常驻加速：现在的小 exe 只占 15MB，默认就热着——双击零等待，角标判断也才有实时焦点。 */
     setTimeout(() => {
-      /* 默认按需启动：不预热，省掉 70MB 常驻；开了「低延迟模式」才预热常驻。 */
-      if (!settings.lowLatency) return;
       try {
+        /* 先把 exe 编出来（只需一次），免得第一次双击还要等编译 */
+        ensureToggleExe();
+        if (!settings.lowLatency) return;
         ensureToggleProc();
         startFocusPolling();
         touchToggleIdle();
       } catch {
         /* 忽略 */
       }
-    }, 3000);
+    }, 1500);
 
     /* 鑷妯″紡锛氬湪椤甸潰閲屾淳鍙戠湡瀹炵殑 PointerEvent锛岃蛋涓€閬嶃€屽睍寮€ 鈫?鎷栧姩銆嶏紝
        姣忔鎵撳嵃绐楀彛 bounds銆傛瘮澶栭儴鍚堟垚榧犳爣浜嬩欢鍙潬锛堜笉浼氭挒鍒伴潰鏉挎牸瀛愶級銆?*/
@@ -1407,7 +1473,7 @@ if (!app.requestSingleInstanceLock()) {
 
     nativeTheme.on('updated', () => {
       if (!win || win.isDestroyed()) return;
-      win.loadURL(`${ORIGIN}/ball.html?surface=desktop&theme=${themeName()}&v=10`);
+      win.loadURL(`${ORIGIN}/ball.html?surface=desktop&theme=${themeName()}&v=11`);
     });
 
     if (probePath) {

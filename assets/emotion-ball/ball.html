@@ -271,7 +271,7 @@
   </section>
   <div id="menu" hidden role="menu">
     <button type="button" class="mi" data-act="gaze"><span class="mk" data-mark="gaze"></span>眼神跟随光标</button>
-    <button type="button" class="mi" data-act="lowlatency"><span class="mk" data-mark="lowlatency"></span>低延迟模式（常驻）</button>
+    <button type="button" class="mi" data-act="lowlatency"><span class="mk" data-mark="lowlatency"></span>常驻加速（约 15MB）</button>
     <div class="sep"></div>
     <div class="mgroup">主题</div>
     <button type="button" class="mi" data-act="theme" data-value="auto"><span class="mk" data-mark="theme:auto"></span>跟随系统</button>
@@ -596,6 +596,19 @@
   var clickTimer = null;
   var suppressClick = false;
   var lastClickAt = 0;
+  /* 鼠标一进到球上就预热后台 PowerShell：等双击落下时它已经 ready，
+     冷启动那一秒就藏在这段"手还没点"的时间里。 */
+  var warmedAt = 0;
+  function warmBackend() {
+    if (!bridge || !bridge.warm) return;
+    var now = Date.now();
+    if (now - warmedAt < 20000) return;
+    warmedAt = now;
+    bridge.warm();
+  }
+  ballWrap.addEventListener('pointerenter', warmBackend);
+  ballWrap.addEventListener('pointerdown', warmBackend);
+
   ballWrap.addEventListener('click', function () {
     if (suppressClick) {
       suppressClick = false;
