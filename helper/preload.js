@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('dshBall', {
   expand: (size) => ipcRenderer.send('ball:expand', size),
   collapse: () => ipcRenderer.send('ball:collapse'),
   resetPosition: () => ipcRenderer.send('ball:reset-position'),
+  /* 重启 DSH：小球是独立进程，DSH 卡死时它还活着，由它把 DSH 杀掉再拉起来 */
+  restartDsh: () => ipcRenderer.send('ball:restart'),
   setSetting: (key, value) => ipcRenderer.send('ball:set-setting', key, value),
   onState: (callback) => {
     ipcRenderer.on('ball:state', (_event, state) => callback(state));

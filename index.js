@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { createEmotionState } from './lib/state.js';
 import { createRuntimeInstaller, ELECTRON_VERSION } from './lib/runtime.js';
+import { createUsage } from './lib/usage.js';
 
 /** ESM 里没有 require：借一份用来取 Electron 的 BrowserWindow。 */
 const nodeRequire = createRequire(import.meta.url);
@@ -130,6 +131,13 @@ const runtimeInstaller = DESKTOP_BALL_ENABLED
 let desktopChild = null;
 
 /**
+ * 账户余额 + 峰谷时段。
+ * 令牌从本机 `~/.dsh/.credentials.yaml` 读，只发给它自己记录的 issuer；
+ * 拿不到就返回 ok:false，菜单里显示「—」，不影响其它功能。
+ */
+const usage = createUsage();
+
+/**
  * 找 Electron 运行时：**只认自己那份**（或显式环境变量）。
  * 刻意不再借用 dsh-pet 的 `$DSH_HOME/electron`——用户删掉 dsh-pet 时球会一起报废。
  * 自己没有就返回 null，由 ensureRuntime() 去下载。
@@ -218,6 +226,7 @@ function resolveRoute(pathname) {
   if (pathname === '/badge') return { file: null, body: null, badge: true };
   if (pathname === '/runtime/retry') return { file: null, body: null, runtimeRetry: true };
   if (pathname === '/activity') return { file: null, body: null, activity: true };
+  if (pathname === '/usage') return { file: null, body: null, usage: true };
   /* 本机调试：模拟「等你回答」的开始/结束，用来测量角标延迟 */
   if (pathname === '/debug/pending') return { file: null, body: null, debugPending: true };
   const script = /^\/js\/([A-Za-z0-9_-]+\.js)$/.exec(pathname);
@@ -331,6 +340,27 @@ function handle(req, res) {
         'Content-Type': 'application/json; charset=utf-8',
         'Access-Control-Allow-Origin': '*',
       });
+    }
+    if (route.usage) {
+      /* 菜单里的「剩余用量」：默认给缓存，refresh=1 时等一次真实请求。
+         令牌只在本机读、只发给 issuer，不回传给浏览器。 */
+      const wantFresh = url.searchParams.get('refresh') === '1';
+      const done = (snap) => {
+        try {
+          send(res, 200, JSON.stringify(snap), {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          });
+        } catch {
+          /* 客户端先断了，忽略 */
+        }
+      };
+      if (!usage) return done({ ok: false, error: 'usage unavailable' });
+      if (wantFresh) {
+        usage.fresh(true).then(done, (error) => done({ ok: false, error: String(error && error.message) }));
+        return undefined;
+      }
+      return done(usage.snapshot());
     }
     if (route.state) {
       const snapshot = liveState ? liveState.snapshot : { emotion: '02', mode: 'auto', note: '' };

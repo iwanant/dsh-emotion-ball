@@ -9,6 +9,7 @@ const { app, BrowserWindow, ipcMain, nativeTheme, screen } = require('electron')
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
+const { buildRestartScript, imageNameOf } = require('./restart-script.js');
 
 const PORT = 8766;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
@@ -849,6 +850,53 @@ function openDsh() {
   }
 }
 
+/**
+ * 重启 DSH。
+ *
+ * 为什么让小球干这件事：球是独立进程，DSH 卡死（主进程不响应）时球还活着，
+ * 这时候它反而是唯一能动手的一方。页面上的按钮、快捷键、托盘图标全在 DSH 里，
+ * 一起跟着死了。
+ *
+ * 不能球自己杀自己旁边的 DSH —— 杀掉之后球也该退场，但它得先把「重启」这件事
+ * 交出去。所以把整个流程写成一份独立的 PowerShell 脚本，detached 起一个进程去跑，
+ * 球自己立刻退出。脚本的顺序是：等球退干净 → 杀光 DSH 的所有进程 → 等进程真的没了
+ * → 重新拉起同一个 exe。杀完不立刻拉起是必须的：DSH 有单实例锁，旧进程还没死透时
+ * 启动新进程只会把那个正在咽气的窗口「聚焦」一下，看起来像什么都没发生。
+ */
+function restartDsh() {
+  const target = dshExe || args.get('dsh-exe');
+  if (!target) {
+    logInput('restart: 找不到 DSH 的 exe');
+    return false;
+  }
+  /* 进程名 = 镜像名去掉 .exe；用名字杀比用 PID 稳：DSH 的窗口进程、GPU 进程
+     都是同一个镜像，卡死时往往是一整窝都要收掉。 */
+  const image = imageNameOf(target);
+  const scriptFile = path.join(app.getPath('userData'), 'dsh-restart.ps1');
+  const logFile = path.join(app.getPath('userData'), 'restart.log');
+  const script = buildRestartScript({ exe: target, image, log: logFile });
+  try {
+    fs.writeFileSync(scriptFile, script);
+  } catch (error) {
+    logInput('restart: 写脚本失败 ' + error.message);
+    return false;
+  }
+  try {
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptFile],
+      { detached: true, stdio: 'ignore', windowsHide: true },
+    );
+    child.unref();
+  } catch (error) {
+    logInput('restart: 起脚本失败 ' + error.message);
+    return false;
+  }
+  /* 球自己退场：DSH 一死宿主就没了，球留在桌面上只会变成孤儿窗口 */
+  setTimeout(() => app.quit(), 150);
+  return true;
+}
+
 function createWindow() {
   const saved = readPosition() || defaultPosition();
   /* 璁板繂鐨勬槸鐞冪殑宸︿笂瑙掞紱绐楀彛鍐呭姣旂悆澶т竴鐐癸紝鍏堝缓鍦ㄧ悆鐨勫師鐐癸紝鍒涘缓鍚庡啀鎸夊疄娴嬪昂瀵告崲绠椼€?*/
@@ -999,6 +1047,11 @@ ipcMain.on('ball:drag-end', () => {
 });
 
 ipcMain.on('ball:open-dsh', () => toggleDshWindow());
+
+/** 右键菜单里的「重启 DSH」：写完脚本就退出，剩下的交给那个独立进程。 */
+ipcMain.on('ball:restart', () => {
+  restartDsh();
+});
 
 /** 鍙抽敭鑿滃崟涓庤缃€?*/
 ipcMain.on('ball:set-setting', (_event, key, value) => {
