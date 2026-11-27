@@ -266,13 +266,15 @@
   }
   .mi:hover { background: var(--eb-cell-bg); }
   .mi { transition: background 120ms ease; }
-  /* 重启项：危险动作，红字；点一次变「再点一次确认」，第二次才真执行 */
+  /* 重启项：危险动作，红字；悬停只让字更亮（不能和「已进入确认态」撞造型），
+     点一次变「再点一次确认」才铺红底，第二次才真执行 */
   .mi.danger { color: var(--eb-danger); }
   .mi.danger .mk { color: var(--eb-danger); }
-  .mi.danger:hover { background: var(--eb-danger-soft); }
+  .mi.danger:hover { background: transparent; filter: brightness(1.25); }
   .mi.danger[data-step="confirm"] {
     background: var(--eb-danger-soft);
     font-weight: 600;
+    filter: none;
   }
   .mk { width: 12px; flex: 0 0 auto; color: var(--eb-accent); }
   .sep { height: 1px; margin: 4px 6px; background: var(--eb-panel-line); }
@@ -329,9 +331,6 @@
       </div>
       <span class="use-next" id="useNext">正在读取…</span>
     </div>
-    <div class="sep"></div>
-    <button type="button" class="mi" data-act="gaze"><span class="mk" data-mark="gaze"></span>眼神跟随光标</button>
-    <button type="button" class="mi" data-act="lowlatency"><span class="mk" data-mark="lowlatency"></span>常驻加速（约 15MB）</button>
     <div class="sep"></div>
     <div class="mgroup">主题</div>
     <button type="button" class="mi" data-act="theme" data-value="auto"><span class="mk" data-mark="theme:auto"></span>跟随系统</button>
@@ -436,7 +435,7 @@
 
   var ball = null;
   var current = null;
-  var state = { expanded: false, showAll: false, mode: 'auto', live: '02', hovering: false, settings: { gaze: true, theme: 'auto' } };
+  var state = { expanded: false, showAll: false, mode: 'auto', live: '02', hovering: false, settings: { theme: 'auto' } };
 
   /* ---------------- 球球 ---------------- */
   function ensure() {
@@ -560,13 +559,9 @@
     resetEl.disabled = mode !== 'manual';
   }
 
-  /* 设置（眼神跟随 / 主题）——菜单里的勾选读这里。
+  /* 设置（目前只剩主题）——菜单里的勾选读这里。
      注意要定义在外层：严格模式下 if 块里的函数声明是块级作用域。 */
   function renderMarks() {
-    var lowMark = menu.querySelector('[data-mark="lowlatency"]');
-    if (lowMark) lowMark.textContent = state.settings.lowLatency ? '✓' : '';
-    var gazeMark = menu.querySelector('[data-mark="gaze"]');
-    if (gazeMark) gazeMark.textContent = state.settings.gaze ? '✓' : '';
     ['auto', 'dark', 'light'].forEach(function (value) {
       var mark = menu.querySelector('[data-mark="theme:' + value + '"]');
       if (mark) mark.textContent = state.settings.theme === value ? '✓' : '';
@@ -776,11 +771,7 @@
 
     bridge.onSettings(function (incoming) {
       if (!incoming) return;
-      state.settings = {
-        gaze: incoming.gaze !== false,
-        theme: incoming.theme || 'auto',
-        lowLatency: incoming.lowLatency === true,
-      };
+      state.settings = { theme: incoming.theme || 'auto' };
       renderMarks();
     });
 
@@ -792,7 +783,7 @@
     });
 
     bridge.onGaze(function (point) {
-      if (!state.settings.gaze || !point) return;
+      if (!point) return;
       var engine = ensure();
       if (engine) engine.setGaze(Number(point.x) || 0, Number(point.y) || 0);
     });
@@ -822,19 +813,6 @@
       var button = event.target.closest('[data-act]');
       if (!button) return;
       var action = button.dataset.act;
-      if (action === 'gaze') {
-        bridge.setSetting('gaze', !state.settings.gaze);
-        state.settings.gaze = !state.settings.gaze;
-        renderMarks();
-        return;
-      }
-      if (action === 'lowlatency') {
-        var next = !state.settings.lowLatency;
-        state.settings.lowLatency = next;
-        bridge.setSetting('lowLatency', next);
-        renderMarks();
-        return;
-      }
       if (action === 'theme') {
         bridge.setSetting('theme', button.dataset.value);
         return;

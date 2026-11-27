@@ -45,7 +45,7 @@ Electron helper（helper/main.js + preload.js）
 | 「恢复自动」 | 退出手动模式 |
 | 拖动小球 | 移动窗口、记住位置；压到屏幕边缘时面板会翻转/夹取，不会被挡住 |
 | 双击小球 | 最小化 / 还原 / 拉起 DSH |
-| 右键小球 | 眼神跟随开关、主题（跟随系统 / 深色 / 浅色） |
+| 右键小球 | 剩余用量 + 峰/谷时段、主题（跟随系统 / 深色 / 浅色）、重启 DSH |
 | 鼠标离开球和面板 | 约 0.5s 后自动收起 |
 | 任务完成 / 出错 | 亮紫色「!」；只在你不看 DSH 时亮。清掉条件：在 DSH 里点/滚/打字、连续聚焦 8 秒、或开始新一轮 |
 | 有问题等你回答 | 亮紫色「?」；一直亮到你回答（或回到 DSH 待满 8 秒） |
@@ -177,20 +177,116 @@ dsh-emotion-ball/
 需求来源很具体：**DSH 会卡死，而卡死的时候球还活着**。界面里的按钮、快捷键、托盘图标全在
 DSH 进程里，一起死了；球是独立进程，宿主不响应它照样在桌面上转。那它就该是那个能动手的人。
 
-1. **谁去杀谁**。球不能"自己杀完再拉起来"——杀掉宿主以后没人收球，它得先退场，而退场之后就
-   没人做后半段了。所以整段流程写成一个 PowerShell 脚本、`detached` 起进程去跑：球点完立刻
-   走到生命尽头，脚本继续跑完。球退场不影响重启，这就是 `detached` 的意义。
+1. **两步确认**。杀进程不能靠误触：第一下只把这一项变红、改成「再点一次，确认重启」并起
+   4 秒计时，第二下才真执行。
 2. **顺序是核心**：等 600ms → 杀掉所有同名进程 → 轮询等它们真的消失（最多 15s，没死再补一刀）
-   → 再 `Start-Process` 同一个 exe。中间那步不能省：DSH 有单实例锁，旧进程没死透时拉起新的，
-   新进程只会去聚焦那个正在咽气的窗口，用户看到的是"没反应"——和 0.3.1 踩过的双击判错方向
-   是同一类错觉。
+   → 再启动同一个 exe。中间那步不能省：DSH 有单实例锁，旧进程没死透时拉起新的，新进程只会
+   去聚焦那个正在咽气的窗口，用户看到的是"没反应"——和 0.3.1 踩过的双击判错方向是同一类错觉。
 3. **按镜像名杀，不按 PID**。卡死时通常是一整窝（主进程 + 渲染 + GPU 都是同一个 exe），
    只杀一个，剩下的会接管窗口。名字从 `--dsh-exe` 的 basename 推出来，不写死。
-4. **两步确认**。杀进程不能靠误触：第一下只把这一项变红、改成「再点一次，确认重启」并起
-   4 秒计时，第二下才真执行。
-5. **不依赖宿主**。菜单是本地页面 + IPC 到球自己的主进程，宿主挂了这条路径照样通——
+4. **不依赖宿主**。菜单是本地页面 + IPC 到球自己的主进程，宿主挂了这条路径照样通——
    这正是它存在的理由。
 
-坑：脚本生成逻辑如果内联在 `main.js` 里就没法单独验证，于是拆成 `helper/restart-script.js`
-（纯函数 `buildRestartScript({exe, image, log})`），可以只做 PowerShell 语法解析而不执行。
-另外 PowerShell 5.1 的 `-File` 对 UTF-8 无 BOM 的中文会乱码，脚本内容一律纯 ASCII。
+### 第一版为什么"点了没反应"（三个坑，全是实测）
+
+第一版是「球 `detached` 起一个 PowerShell 脚本，150ms 后自己退出」。用户点下去的实际表现是
+**球消失了、DSH 一动不动、连日志文件都没生成**。逐条排除后得到三个独立的坑：
+
+1. **`detached: true` 在 Windows 上等于 `DETACHED_PROCESS`（没有控制台）**，而
+   `powershell.exe` 在没有控制台时会立刻静默退出——退出码 0，一行都不执行。所以
+   `restart.log` 根本不存在。去掉 `detached` 后脚本立刻正常跑。
+2. **球一退出，它的子进程就跟着死**。实验：A(electron) → B(electron) → PS 写 tick，
+   `Stop-Process -Id <A>` 之后 3 秒，B 也没了，tick 停在第 27 行——Electron 用 Job Object
+   收子进程。而重启流程里 DSH 被杀时，球恰好也在这一刻被带走，于是脚本半路夭折。
+3. **WMI 创建的 `powershell.exe` 跑不了脚本**。`-File`、`-EncodedCommand`、
+   `-Command "& 'x.ps1'"` 三种写法全部「返回 0、进程在、脚本一行不执行」；
+   但极短的内联 `-Command "Add-Content ..."`、`cmd.exe /c echo` 反而正常。
+   csc 编出来的小 exe 经 WMI 启动则完全正常。
+
+### 第二版为什么"屏幕上闪一个黑框"（winexe）
+
+第一版修好之后功能是通的，但用户立刻反馈：**重启的时候会跳出一个 PowerShell 窗口**。原因
+不是 `-WindowStyle Hidden` 没写，而是两段进程本身都是控制台程序：
+
+1. **被 WMI 创建的控制台程序一定会拿到一个控制台窗口。** `Win32_Process.Create` 没有
+   `CREATE_NO_WINDOW` 这类启动标志可传，所以只要 PE 头的 Subsystem 是 3（console），
+   Windows 就替它 new 一个控制台 —— 用户看到的就是一闪而过的黑框。
+2. 解决办法是 `/target:winexe`（Subsystem 2 = GUI）。`winexe` 进程没有控制台可用，
+   不打印、不闪；用 `Process.Start` 或 `spawn` 拉起它也不会带出窗口。
+   两个 exe 的 PE 头实测都是 2，可以写进断言。
+3. **顺手把 PowerShell 整个换掉**：第一段原先靠 `powershell.exe -Command` 做一次 WMI 调用。
+   它自己就是控制台程序（会闪），也不能省掉那层。改成一个 100 行的
+   `restart-launcher.cs`（`ManagementClass("Win32_Process").InvokeMethod("Create", …)`），
+   启动从 ~500ms 掉到 ~100ms，链路上再没有任何解释器。
+4. 为什么 `toggle-helper.cs` 还是控制台程序？因为它要跟球走 stdin/stdout 管道通信，
+   而球 spawn 它时带了 `windowsHide: true`（Node 会传 `CREATE_NO_WINDOW`），所以不闪。
+   **重启这两段不同**：它们由 WMI 创建，拿不到这个标志，只能靠 winexe。
+
+### 最终结构
+
+```
+球 ──spawn──> dsh-restart-launcher.exe ──WMI──> dsh-restart-helper.exe ──> 新的 DSH
+               （winexe，约 100ms）              （winexe）
+```
+
+- launcher 只做一件事：用 `ManagementClass("Win32_Process").InvokeMethod("Create", …)` 把
+  执行体交给 WMI 创建，然后带 WMI 的返回码退出。球在 launcher 退出后 `app.quit()`。
+- 执行体是 C#（`helper/restart-helper.cs`，编译后约 5.5 KB）：
+  等 600ms → `Process.GetProcessesByName(image)` 逐个 `Kill()` → 轮询 15s 等消失 →
+  再补一刀 → 等 400ms → `ProcessStartInfo` 重新拉起同一个 exe。日志 UTF-8 追加到
+  `%APPDATA%\dsh-emotion-ball-helper\restart.log`，写日志失败不影响重启本身。
+- WMI 创建出来的进程不属于球的进程树，所以球（以及 DSH）怎么死都不牵连它。
+
+坑：参数拼装如果内联在 `main.js` 里就没法单独验证，于是拆成 `helper/restart-launch.js`
+（纯函数 `buildLauncherArgs()` / `imageNameOf()`）。`test/restart-launch.mjs` 顺手把
+「两段都必须是 winexe」「重启路径不许再出现 powershell」也钉成断言——这类回归不会报错，
+只会让黑框悄悄回来。
+
+### 第三个坑：改了代码，黑框还在（编译缓存）
+
+改成 winexe 之后用户仍然报「重启还是会闪一个 PowerShell 窗口」。查 PE 头才看清：
+`dsh-restart-launcher.exe` 已经是 Subsystem 2，但 `dsh-restart-helper.exe` 还是 **3**——
+那一份是加 `winexe` 之前编出来的，而 `compileHelper` 的文件名只带源码 mtime：
+
+```js
+const target = path.join(app.getPath('userData'), `${prefix}-${stamp}.exe`);
+if (fs.existsSync(target)) return target;   // ← 源码没改就一直复用旧产物
+```
+
+`restart-helper.cs` 的内容没变，mtime 没变，于是旧的控制台产物永远是「缓存命中」，
+`/target:winexe` 根本没机会生效。黑框是**执行体自己**弹出来的，不是 launcher。
+
+改法两件：
+1. 文件名带上子系统标记 `${prefix}${opts.winexe ? '-w' : ''}-${stamp}.exe`，清理旧产物的
+   正则同时匹配两种命名（`^prefix(-w)?-\d+\.exe$`）。缓存键必须覆盖「所有会改变产物的输入」，
+   编译选项也算输入。
+2. 加 `test/helper-subsystem.mjs`：真的调一次 csc 编出三段 exe，读 PE 头的 Subsystem 字段
+   断言 2/2/3。这条测试的意义是——「源码里写了 `/target:winexe`」这种自证毫无价值，
+   只有产物才能证明没有控制台窗口。
+
+## 删掉两个开关，改成固定常开（0.6.0）
+
+用户说：「把右键菜单栏里面的眼神跟随光标和常驻加速选项删掉吧，改成一直这样的」。
+
+删理由不是嫌多，是**这两个开关没有真正需要关的场景**：
+
+- **眼神跟随**：只有一种情况会关它——嫌烦。但关掉之后球变成死的，反而更难看出它在响应；
+  而真正想让球安静的场合（全屏游戏、录屏），关掉跟随并不会让球消失，意义不大。
+- **常驻加速**：这个开关原本是给「不想多花 80MB 内存」的人留的后路（那时常驻的是 PowerShell）。
+  换成 `csc` 编的小 exe 之后只有约 3MB，而**关掉它的代价是第一次双击要多等一秒**——
+  一个「省 3MB、赔一秒」的选项本身就是坏选项。更何况焦点轮询每秒都要问它一次，
+  真按空闲退出反而会制造冷启动竞态。
+
+代码上的连带清理（开关一词渗透得比想象中深）：
+
+1. `ball.html`：删两个 `<button class="mi" data-act="gaze|lowlatency">`，`renderMarks()`
+   少两个勾选分支，click 处理只剩 `theme` / `restart`。
+2. `helper/main.js`：`settings` 只剩 `{ theme, lastFocus }`；`broadcastSettings()` 只发主题
+   （原来整个对象发过去，会把 `lastFocus` 一起漏给页面）；`pushGaze()` 去掉 `settings.gaze` 判断；
+   启动预热块去掉 `if (!settings.lowLatency) return;`，改成无条件执行。
+3. `preload.js` / `client.js` 不用动：它们只转发键值，不校验存在哪些开关。
+
+顺带撞出一个视觉 bug：菜单变短后截图时鼠标正好停在「重启 DSH」上，`.mi.danger:hover`
+和 `.mi.danger[data-step="confirm"]` 用的是同一个 `--eb-danger-soft` 底色，截图里根本分不清
+「只是悬停」还是「已经进入确认态」。改成 hover 只 `filter: brightness(1.25)` 提亮字，
+只有确认态才铺红底——悬停和已武装必须是两种造型。

@@ -1,15 +1,15 @@
 /**
- * 妗岄潰鐞?鈥斺€?Electron 涓昏繘绋? *
- * 鐢?DSH 瀹夸富渚х殑鎻掍欢鎷夎捣锛坅pply 鏃?spawn銆乨ispose 鏃?kill锛夛紝鎵€浠ワ細
- *   鎻掍欢鍦?鈫?鐞冨湪锛涙彃浠跺仠鐢?/ DSH 鎵樼洏閫€鍑?鈫?鐞冩秷澶便€傛病鏈夊紑鏈鸿嚜鍚紝涔熸病鏈夊鍎胯繘绋嬨€? *
- * 绐楀彛褰㈡€侊細鏃犺竟妗嗐€侀€忔槑銆佺疆椤躲€佷笉杩涗换鍔℃爮銆?4脳44銆? * 鍐呭锛氱洿鎺ュ姞杞藉涓婚潤鎬佹湇鍔′笂鐨?ball.html锛堝拰缃戦〉閲岄偅棰楁槸鍚屼竴浠界礌鏉愶紝涓嶅鍒讹級銆? * 鐘舵€侊細杞 /state锛?00ms锛夛紝鎷垮埌 emotionId 鍚?executeJavaScript 璋?window.__EB_SET銆? *
- * 涓轰粈涔堣疆璇㈣€屼笉鏄?IPC锛欵lectron 涓昏繘绋嬭涓嶅埌 piped stdin锛坋lectron#4218锛夛紝
- * 鑰?DSH 瀹夸富鍜岃繖涓?helper 鏄袱涓繘绋嬨€傝疆璇竴涓湰鏈?400ms 鐨勬帴鍙ｆ渶鐪佷簨銆佷篃鏈€濂芥帓閿欍€? */
+ * 桌面球 —— Electron 主进程
+ * 由 DSH 宿主侧的插件拉起（apply 时 spawn、dispose 时 kill），所以：
+ *   插件在 → 球在；插件禁用 / DSH 托盘退出 → 球消失。没有开机自启，也没有孤儿进程。
+ * 窗口形态：无边框、透明、置顶、不进任务栏，44×44；内容直接加载宿主静态服务上的 ball.html；状态轮询 /state（400ms）。
+ * 为什么轮询而不是 IPC：Electron 主进程读不到 piped stdin（electron#4218），
+ * 而 DSH 宿主和这个 helper 是两个进程。轮询一个本地 400ms 的接口最省事、也最好排错。 */
 const { app, BrowserWindow, ipcMain, nativeTheme, screen } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
-const { buildRestartScript, imageNameOf } = require('./restart-script.js');
+const { buildLauncherArgs, imageNameOf } = require('./restart-launch.js');
 
 const PORT = 8766;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
@@ -18,11 +18,11 @@ const POLL_MS = 400;
 /** 角标亮着时用的快速轮询间隔：让「回答完就消失」几乎是即时的。 */
 const BADGE_POLL_MS = 120;
 
-/* 閫忔槑绐楀彛 + 杞欢娓叉煋鏈€绋筹細鏌愪簺浼氳瘽锛堣繙绋嬫闈€佹棤鐙樉銆佽娉ㄥ叆鐨勬覆鏌撹繘绋嬶級
-   涓嬪甫 GPU 鍚堟垚浼氭姏 UnknownVizError锛岄€忔槑绐楀彛鐩存帴鍙橀粦鍧椼€?*/
+/* 透明窗口 + 软件渲染最稳：某些会话（远程桌面、无独显、被注入的渲染进程）
+   下开 GPU 合成会抛 UnknownVizError，透明窗口直接变黑块。 */
 app.disableHardwareAcceleration();
 
-/** --key=value 褰㈠紡鐨勫弬鏁?*/
+/** --key=value 形式的参数 */
 const args = new Map(
   process.argv
     .filter((item) => item.startsWith('--') && item.includes('='))
@@ -33,8 +33,8 @@ const args = new Map(
 );
 
 /**
- * 寮€鍙戞湡寮€鍏筹細鍙湁鏄惧紡 --dev=1锛堟垨鐜鍙橀噺 DSH_EMOTION_BALL_DEV=1锛夋墠鍚敤
- * 鑷妯″紡銆佹帰閽堟埅鍥惧拰 input.log 璇婃柇鍐欑洏銆傛甯歌繍琛屾椂杩欎簺涓€姒備笉鐢熸晥锛? * 鍏嶅緱鎶婅皟璇曠敤鐨勪笢瑗跨暀鍦ㄦ寮忚涓洪噷銆? */
+ * 开发期开关：只有显式 --dev=1（或环境变量 DSH_EMOTION_BALL_DEV=1）才启用
+ * 自检模式、探针截图和 input.log 诊断写盘。正常运行时这些一律不生效，免得把调试用的东西留在正式运行里。 */
 const DEV_MODE = args.get('dev') === '1' || process.env.DSH_EMOTION_BALL_DEV === '1';
 
 const probePath = DEV_MODE ? args.get('probe') || null : null;
@@ -48,23 +48,23 @@ let pollGeneration = 0;
 let lastEmotion = null;
 let positionFile = null;
 let dragState = null;
-/** 灞曞紑鐘舵€佷笌闈㈡澘灏哄锛圕SS px锛夛紝绐楀彛 = 鐞?+ 闈㈡澘 鐨勫苟闆嗐€?*/
+/** 展开状态与面板尺寸（CSS px），窗口 = 球 + 面板 的并集。 */
 let expanded = false;
 let panelSize = { width: 268, height: 380 };
 let ignoringMouse = null;
 let hitTimer = null;
 let leaveTimer = null;
-/** 鐩爣绐楀彛灏哄锛圕SS/DIP锛夛細灞曞紑鍜屾嫋鍔ㄩ兘鍐欒繖涓父閲忥紝閬垮厤 DPI 鎹㈢畻鏉ュ洖婕傜Щ銆?*/
+/** 目标窗口尺寸（CSS/DIP）：展开和拖动都写这个常量，避免 DPI 换算来回漂移。 */
 let targetSize = { width: BALL_SIZE, height: BALL_SIZE };
-/** 灞曞紑鏂瑰悜锛氱悆鍦ㄤ笅鏂规椂鍐呭鏈濅笂锛坲p锛夛紝鐞冨湪涓婃柟鏃跺唴瀹规湞涓嬶紙down锛夈€?*/
+/** 展开方向：球在下方时内容朝上（up），球在上方时内容朝下（down）。 */
 let layout = 'up';
 /** 球的基准位置（DIP）。所有展开/收起都从它算，避免反复推导时逐次漂移。 */
 let ballAnchor = null;
-/** 姘村钩閿氱偣锛歳ight = 鐞冨湪绐楀彛鍙宠竟锛堥潰鏉挎湞宸﹀睍寮€锛夛紝left = 缈诲埌鍙︿竴渚с€?*/
+/** 水平锚点：right = 球在窗口右边（面板朝左展开），left = 翻到另一侧。 */
 let panelAlign = 'right';
 
-/** 鐢ㄦ埛璁剧疆锛氱溂绁炶窡闅?+ 涓婚鍋忓ソ銆傚瓨 userData/settings.json銆?*/
-let settings = { gaze: true, theme: 'auto', lowLatency: true, lastFocus: null };
+/** 用户设置：只剩主题偏好（眼神跟随和常驻加速已经固定开启）。存 userData/settings.json。 */
+let settings = { theme: 'auto', lastFocus: null };
 let settingsFile = null;
 const GAZE_RADIUS = 260;
 
@@ -73,14 +73,12 @@ function readSettings() {
     const parsed = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
     if (parsed && typeof parsed === 'object') {
       settings = {
-        gaze: parsed.gaze !== false,
         theme: parsed.theme === 'dark' || parsed.theme === 'light' ? parsed.theme : 'auto',
-        lowLatency: parsed.lowLatency !== false,
         lastFocus: typeof parsed.lastFocus === 'boolean' ? parsed.lastFocus : null,
       };
     }
   } catch {
-    /* 棣栨杩愯娌℃湁鏂囦欢 */
+    /* 首次运行没有文件 */
   }
 }
 
@@ -88,16 +86,16 @@ function saveSettings() {
   try {
     fs.writeFileSync(settingsFile, JSON.stringify(settings));
   } catch {
-    /* 蹇界暐 */
+    /* 忽略 */
   }
 }
 
 function broadcastSettings() {
   if (win && !win.isDestroyed()) {
     try {
-      win.webContents.send('ball:settings', settings);
+      win.webContents.send('ball:settings', { theme: settings.theme });
     } catch {
-      /* 蹇界暐 */
+      /* 忽略 */
     }
   }
 }
@@ -118,7 +116,7 @@ function readPosition() {
     const parsed = JSON.parse(raw);
     if (Number.isFinite(parsed.x) && Number.isFinite(parsed.y)) return { x: parsed.x, y: parsed.y };
   } catch {
-    /* 棣栨杩愯娌℃湁鏂囦欢 */
+    /* 首次运行没有文件 */
   }
   return null;
 }
@@ -144,7 +142,7 @@ function clampToDisplays(point, size) {
     );
   });
   if (inside) return point;
-  /* 鏁翠釜绐楀彛璺戝埌鏄剧ず鍣ㄤ箣澶栵細澶瑰洖涓诲睆锛屽埆鐬Щ鍥為粯璁ょ偣 */
+  /* 整个窗口跑到显示器之外：夹回主屏，别瞬移回默认点 */
   const area = screen.getPrimaryDisplay().workArea;
   return {
     x: Math.round(Math.min(Math.max(area.x, point.x), area.x + area.width - box.width)),
@@ -226,8 +224,8 @@ function displayScale(x, y) {
 function ballPosition() {
   if (!win || win.isDestroyed()) return null;
   const bounds = win.getContentBounds();
-  /* 绐楀彛鍐呭姣旂悆澶у嚭涓€鐐癸紙閫忔槑绐楃殑杈圭紭锛夛紝鐞冨湪椤甸潰閲屾槸闈犲彸涓嬭瀵归綈鐨勶紝
-     鎵€浠ユ敹璧锋椂涔熶笉鑳界洿鎺ユ嬁绐楀彛鍘熺偣褰撶悆鐨勪綅缃紝鍚﹀垯灞曞紑浼氬亸鍑犱釜鍍忕礌銆?*/
+  /* 窗口内容比球大出一点（透明窗的边缘），球在页面里是靠右下角对齐的，
+     所以收起时也不能直接拿窗口原点当球的位置，否则展开会偏几个像素。 */
   return {
     x: Math.round(panelAlign === 'left' ? bounds.x : bounds.x + bounds.width - BALL_SIZE),
     y: Math.round(layout === 'up' ? bounds.y + bounds.height - BALL_SIZE : bounds.y),
@@ -238,7 +236,7 @@ function savePosition(point) {
   try {
     fs.writeFileSync(positionFile, JSON.stringify({ x: point.x, y: point.y }));
   } catch {
-    /* 鍐欎笉浜嗗氨鍙湪鏈浼氳瘽閲岃浣?*/
+    /* 写不了就只在本次会话里记着 */
   }
 }
 
@@ -252,7 +250,7 @@ async function applyEmotion(emotionId) {
       true,
     );
   } catch {
-    /* 椤甸潰杩樻病灏辩华锛屼笅涓€娆¤疆璇細琛ヤ笂 */
+    /* 页面还没就绪，下一次轮询会补上 */
   }
 }
 
@@ -336,18 +334,18 @@ function stopPolling() {
   pollTimer = null;
 }
 
-/* ---------------- 瀹屾垚 / 鍑洪敊鎻愰啋 ---------------- */
+/* ---------------- 完成 / 出错提醒 ---------------- */
 
-/** 涓婁竴娆¤疆璇㈠埌鐨勮〃鎯咃細鐢ㄦ潵鎵俱€岃烦杩?33/34/35銆嶇殑閭ｄ竴涓嬨€?*/
+/** 上一次轮询到的表情：用来抓「跳过 33/34/35」的那一下。 */
 let lastPollEmotion = null;
 let badgeOn = false;
-/** 浜鏍囩殑閭ｄ竴杞紱鐢?epoch 鍒ゆ柇銆屾柊涓€杞换鍔″紑濮嬩簡銆嶏紝姣?running 鎶栧姩鍙潬銆?*/
+/** 亮角标的那一轮；用 epoch 判断「新一轮任务开始了」，比 running 抖动可靠。 */
 let badgeTurn = 0;
 /** 角标出现的时刻：用来判断「之后你有没有在 DSH 里操作过」。 */
 let badgeSetAt = 0;
-/** 褰撳墠瑙掓爣鐨勭被鍨嬶細wait 闇€瑕佸湪銆屽凡鍥炵瓟銆嶆椂鑷姩娓呮帀銆?*/
+/** 当前角标的类型：wait 需要在「已回答」时自动清掉。 */
 let lastBadgeKind = '';
-/** DSH 杩炵画鑱氱劍璧峰鏃堕棿锛氱煭鏆傜殑鐒︾偣鍒囨崲涓嶇畻銆屽凡璇汇€嶃€?*/
+/** DSH 连续聚焦起始时间：短暂的焦点切换不算「已读」。 */
 let focusedSince = 0;
 const FOCUS_ACK_MS = 8000;
 
@@ -363,16 +361,16 @@ const HINTS = {
 };
 
 /**
- * 鐘舵€佽烦杩涖€屽畬鎴?/ 鍑洪敊 / 绛夊緟纭銆嶆椂浜鏍囷紙涓嶅脊绯荤粺 toast锛宒sh-pet 宸茬粡鍦ㄥ仛锛夈€? *
- * 娓呴櫎瑙勫垯鍒绘剰淇濆畧鈥斺€斾箣鍓嶃€孌SH 涓€鑾峰緱鐒︾偣灏辨竻銆嶄細璁╀綘鍥炴潵鐐圭獥鍙ｇ殑鐬棿琚竻鎺夈€? * 绛変簬娌℃彁閱掋€傜幇鍦ㄥ彧鏈夎繖涓や欢浜嬬畻銆屽凡璇汇€嶏細
- *   1. 鏂颁竴杞换鍔″紑濮嬶紙epoch 鍓嶈繘锛夆€斺€旇鏄庝綘宸茬粡鍥炴潵骞叉椿浜? *   2. DSH 杩炵画鑱氱劍 鈮?8 绉掆€斺€旇鏄庝綘鐪熺殑鍦ㄧ湅锛屼笉鏄垏绐楀彛璺繃
+ * 状态跳进「完成 / 出错 / 等待确认」时亮角标（不弹系统 toast，dsh-pet 已经在做）。
+ * 清除规则刻意保守——之前「DSH 一获得焦点就清」会让你回来点窗口的瞬间被清掉，等于没提醒。现在只有两件事算「已读」：
+ *   1. 新一轮任务开始（epoch 前进）；2. DSH 连续聚焦 ≥8 秒（说明你真的在看，不是切窗口路过）
  */
 function handleEmotionEdge(state) {
   const emotion = String(state.emotion || '');
   const before = lastPollEmotion;
   lastPollEmotion = emotion;
 
-  /* 宸茶鏉′欢锛氭柊涓€杞换鍔″紑濮嬶紝鎴栬€?DSH 杩炵画鑱氱劍瓒冲涔?*/
+  /* 已读条件：新一轮任务开始，或者 DSH 连续聚焦足够久 */
   if (badgeOn) {
     const turnMoved = typeof state.turns === 'number' && state.turns > badgeTurn;
     if (isDshFocused(state)) {
@@ -392,8 +390,8 @@ function handleEmotionEdge(state) {
   }
 
   /*
-   * 銆岀瓑鎴戝洖绛斻€嶆槸**鎸佺画鐘舵€?*锛屼笉鏄竴娆¤竟娌匡細
-   * 鍙 DSH 杩樻湁寰呭洖绛旂殑浜や簰銆佽€屼綘涓嶅湪绐楀彛鍓嶏紝瑙掓爣灏辫涓€鐩翠寒鐫€銆?   * 锛堜箣鍓嶅彧鎸夎竟娌垮垽鏂紝浣犲湪闂鍑虹幇鍚庢墠鍏崇獥鍙ｏ紝灏辨案杩滀笉鎻愰啋銆傦級
+   * 「等我回答」是持续状态，不是一次边沿：
+   * 只要 DSH 还有待回答的交互、而你不在窗口前，角标就该一直亮着（之前只按边沿判断，你在问题出现后才关窗口，就永远不提醒）。
    */
   if (state.pending === true && !isDshFocused(state)) {
     if (!badgeOn) {
@@ -407,13 +405,13 @@ function handleEmotionEdge(state) {
     }
     return;
   }
-  /* 寰呭洖绛旂粨鏉燂紙浣犲洖绛斾簡锛夛細wait 瑙掓爣绠楀凡璇?*/
+  /* 待回答结束（你回答了）：wait 角标算已读 */
   if (lastBadgeKind === 'wait' && state.pending !== true) {
     clearBadge('answered');
     lastBadgeKind = '';
   }
 
-  /* 瀹屾垚 / 鍑洪敊浠嶇劧鏄竴娆℃€т簨浠讹細涓嶅湪璺熷墠鎵嶆彁閱?*/
+  /* 完成 / 出错仍然是一次性事件：不在跟前才提醒 */
   if (!before || before === emotion) return;
   const hint = HINTS[emotion];
   if (!hint || hint.kind === 'wait') return;
@@ -428,7 +426,7 @@ function handleEmotionEdge(state) {
   sendBadge({ kind: hint.kind, text: badgeText(hint.kind) });
   reportBadge(true, hint.kind, 'edge');
 }
-/** 娓呰鏍囧苟涓婃姤鍘熷洜锛堜笂鎶ヨ繘 /state锛屾柟渚挎帓鏌ャ€屼负浠€涔堟病鎻愰啋 / 涓轰粈涔堟病娓呫€嶏級銆?*/
+/** 清角标并上报原因（上报进 /state，方便排查「为什么没提醒 / 为什么没清」）。 */
 function clearBadge(why) {
   if (!badgeOn) return;
   badgeOn = false;
@@ -439,7 +437,7 @@ function clearBadge(why) {
   reportBadge(false, '', why);
 }
 
-/** 鎶婅鏍囩姸鎬佸憡璇夊涓伙紝鎸傚湪 /state 涓娿€?*/
+/** 把角标状态告诉宿主，挂在 /state 上。 */
 /** 最近一次轮询到的 state：角标日志要记「当时的上下文」。 */
 let lastState = null;
 /** 角标变化日志（最多 10 条），随 /badge 一起上报，便于远程排查。 */
@@ -470,7 +468,7 @@ function reportBadge(on, kind, why) {
       .get(ORIGIN + '/badge?' + query, (response) => response.resume())
       .on('error', () => {});
   } catch {
-    /* 蹇界暐 */
+    /* 忽略 */
   }
 }
 function sendBadge(payload) {
@@ -478,14 +476,14 @@ function sendBadge(payload) {
   try {
     win.webContents.send('ball:badge', payload);
   } catch {
-    /* 蹇界暐 */
+    /* 忽略 */
   }
 }
 
 /**
- * 鍙屽嚮灏忕悆锛欴SH 绐楀彛寮€鐫€ 鈫?鏈€灏忓寲锛涙渶灏忓寲鐫€ 鈫?杩樺師锛涢殣钘忓埌鎵樼洏/娌″惎鍔?鈫?鎷夎捣銆? *
- * Node 娌℃湁鍘熺敓 Win32锛屾墍浠ュ€?PowerShell 璋?user32銆備絾**姣忔鍙屽嚮鍐峰惎鍔ㄤ竴娆? * PowerShell锛堣繕瑕佺幇鍦虹紪璇?C#锛夎 300~400ms**锛屾墜鎰熷緢宸€? * 鎵€浠ヨ繖閲屾敼鎴愶細绗竴娆＄敤鍒版椂璧蜂竴涓?*甯搁┗**鐨?PowerShell锛屼箣鍚庡弻鍑诲彧寰€瀹?stdin
- * 鍐欎竴琛?"toggle"锛屽欢杩熼檷鍒板嚑鍗佹绉掋€? */
+ * 双击小球：DSH 窗口开着 → 最小化；最小化着 → 还原；隐藏到托盘 / 没启动 → 拉起。
+ * Node 没有原生 Win32，所以借 PowerShell 调 user32。但每次双击冷启动一次要 300~400ms（还要现场编译 C#），手感很差；
+ * 所以改成：第一次用到时起一个常驻 PowerShell，之后双击只往它 stdin 写一行 "toggle"，延迟降到几十毫秒。 */
 const DSH_TOGGLE_PS = [
   /* ASCII comments only: PowerShell 5 reads BOM-less .ps1 as ANSI and mangles Chinese,
      which has silently eaten newlines and broken this script twice. */
@@ -660,13 +658,14 @@ function touchToggleIdle() {
   /* 有意留空：保留调用点，方便以后真需要按需退出时改回来。 */
 }
 
-/** 鎳掑惎鍔ㄥ父椹?PowerShell锛堢涓€娆″弻鍑讳細鎱竴鐐癸紝涔嬪悗涓€鐩存槸鐑殑锛夈€?*/
+/** 懒启动常驻 PowerShell（第一次双击会慢一点，之后一直是热的）。 */
 /**
- * 把 helper/toggle-helper.cs 编译成一个小 exe（用系统自带的 csc.exe，不需要装 .NET SDK）。
- * 冷启动约 40ms、常驻约 12MB；编不出来就返回 null，退回 PowerShell 方案。
+ * 把 helper/<sourceName> 编译成一个小 exe（用系统自带的 csc.exe，不需要装 .NET SDK）。
+ * 冷启动约 40ms；编不出来就返回 null，由调用方决定退路。
  */
-function ensureToggleExe() {
-  const sourceFile = path.join(__dirname, 'toggle-helper.cs');
+function compileHelper(sourceName, prefix, options) {
+  const opts = options || {};
+  const sourceFile = path.join(__dirname, sourceName);
   if (!fs.existsSync(sourceFile)) return null;
   let stamp = 0;
   try {
@@ -674,8 +673,11 @@ function ensureToggleExe() {
   } catch {
     return null;
   }
-  /* 文件名带版本号：exe 正在运行时自己无法被覆盖，换个名字编译就不会撞锁 */
-  const target = path.join(app.getPath('userData'), `dsh-toggle-helper-${stamp}.exe`);
+  /* 文件名带版本号：exe 正在运行时自己无法被覆盖，换个名字编译就不会撞锁。
+     子系统也算进文件名里：winexe 和控制台是两次不同的编译，只按源码 mtime 缓存会让
+     早先编出来的控制台版本一直被复用——那正是「改完了还是闪黑框」的原因。 */
+  const flavor = opts.winexe ? '-w' : '';
+  const target = path.join(app.getPath('userData'), `${prefix}${flavor}-${stamp}.exe`);
   if (fs.existsSync(target)) return target;
   const compiler = [
     'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe',
@@ -683,19 +685,26 @@ function ensureToggleExe() {
   ].find((item) => fs.existsSync(item));
   if (!compiler) return null;
   try {
-    const result = spawnSync(compiler, ['/nologo', '/target:exe', '/optimize+', '/out:' + target, sourceFile], {
+    const argv = ['/nologo', '/optimize+'];
+    /* winexe = GUI 子系统，没有控制台。重启那两段必须是它：控制台程序被 WMI 创建时
+       Windows 会分配一个控制台窗口，用户看到的就是「点了重启屏幕上闪一个黑框」。 */
+    argv.push(opts.winexe ? '/target:winexe' : '/target:exe');
+    for (const ref of opts.refs || []) argv.push('/r:' + ref + '.dll');
+    argv.push('/out:' + target, sourceFile);
+    const result = spawnSync(compiler, argv, {
       windowsHide: true,
       timeout: 30000,
       encoding: 'utf8',
     });
     if (result.status !== 0 || !fs.existsSync(target)) {
-      logInput('toggle-helper 编译失败: ' + String(result.stderr || result.stdout || '').slice(0, 160));
+      logInput(`${prefix} 编译失败: ` + String(result.stderr || result.stdout || '').slice(0, 160));
       return null;
     }
-    /* 编好之后顺手清掉旧版本 */
+    /* 编好之后顺手清掉旧版本（含以前按别的子系统编出来的同名产物） */
     const current = path.basename(target);
+    const pattern = new RegExp(`^${prefix}(-w)?-\\d+\\.exe$`);
     for (const name of fs.readdirSync(app.getPath('userData'))) {
-      if (/^dsh-toggle-helper-\d+\.exe$/.test(name) && name !== current) {
+      if (pattern.test(name) && name !== current) {
         try {
           fs.unlinkSync(path.join(app.getPath('userData'), name));
         } catch {
@@ -705,9 +714,24 @@ function ensureToggleExe() {
     }
     return target;
   } catch (error) {
-    logInput('toggle-helper 编译异常: ' + error.message);
+    logInput(`${prefix} 编译异常: ` + error.message);
     return null;
   }
+}
+
+/** 窗口操作小 exe：双击最小化/还原/置顶都由它调 user32。需要 stdin/stdout，保持控制台子系统。 */
+function ensureToggleExe() {
+  return compileHelper('toggle-helper.cs', 'dsh-toggle-helper');
+}
+
+/** 「重启 DSH」第二段：由 WMI 创建，脱离球的进程树，负责杀进程再拉起。没有窗口。 */
+function ensureRestartExe() {
+  return compileHelper('restart-helper.cs', 'dsh-restart-helper', { winexe: true });
+}
+
+/** 「重启 DSH」第一段：只做一次 WMI 调用。winexe，所以没有控制台窗口。 */
+function ensureRestartLauncherExe() {
+  return compileHelper('restart-launcher.cs', 'dsh-restart-launcher', { winexe: true, refs: ['System.Management'] });
 }
 
 function ensureToggleProc() {
@@ -807,7 +831,7 @@ async function toggleDshWindow() {
     proc.stdin.write(command + '\n');
     logInput('dsh-toggle sent');
   } catch {
-    /* 绠￠亾鏂簡灏遍噸鏉ヤ竴娆?*/
+    /* 管道断了就重来一次 */
     toggleProc = null;
     const retry = ensureToggleProc();
     try {
@@ -819,7 +843,7 @@ async function toggleDshWindow() {
   }
 }
 
-/** 閫€鍑烘椂鎶婂父椹?PowerShell 鍏虫帀锛屽埆鐣欏鍎胯繘绋嬨€?*/
+/** 退出时把常驻 PowerShell 关掉，别留孤儿进程。 */
 function stopToggleProc() {
   if (!toggleProc) return;
   const proc = toggleProc;
@@ -827,26 +851,26 @@ function stopToggleProc() {
   try {
     proc.stdin.end();
   } catch {
-    /* 蹇界暐 */
+    /* 忽略 */
   }
   setTimeout(() => {
     try {
       proc.kill();
     } catch {
-      /* 蹇界暐 */
+      /* 忽略 */
     }
   }, 300);
 }
 
 function openDsh() {
-  /* 澶嶇敤 DSH 鑷繁鐨勫崟瀹炰緥閿侊細宸茬粡鍦ㄨ窇灏卞彧鏄仛鐒︼紝涓嶄細寮€绗簩涓獥鍙?*/
+  /* 复用 DSH 自己的单实例锁：已经在跑就只是聚焦，不会开第二个窗口 */
   const target = dshExe || args.get('dsh-exe');
   if (!target) return;
   try {
     const child = spawn(target, [], { detached: true, stdio: 'ignore' });
     child.unref();
   } catch {
-    /* 鍚姩澶辫触灏卞畨闈欏湴绠椾簡 */
+    /* 启动失败就安静地算了 */
   }
 }
 
@@ -857,11 +881,12 @@ function openDsh() {
  * 这时候它反而是唯一能动手的一方。页面上的按钮、快捷键、托盘图标全在 DSH 里，
  * 一起跟着死了。
  *
- * 不能球自己杀自己旁边的 DSH —— 杀掉之后球也该退场，但它得先把「重启」这件事
- * 交出去。所以把整个流程写成一份独立的 PowerShell 脚本，detached 起一个进程去跑，
- * 球自己立刻退出。脚本的顺序是：等球退干净 → 杀光 DSH 的所有进程 → 等进程真的没了
- * → 重新拉起同一个 exe。杀完不立刻拉起是必须的：DSH 有单实例锁，旧进程还没死透时
- * 启动新进程只会把那个正在咽气的窗口「聚焦」一下，看起来像什么都没发生。
+ * 不能球自己杀自己旁边的 DSH —— 杀掉之后球也会被一起收掉（Electron 把子进程挂在
+ * Job Object 上），所以它必须先把手上的活交给一个「不在自己进程树里」的执行体。
+ * 那个执行体由 launcher 经 WMI 创建（见 helper/restart-launch.js），顺序是：
+ * 等一下 → 杀光 DSH 的所有进程 → 等进程真的没了 → 重新拉起同一个 exe。
+ * 杀完不立刻拉起是必须的：DSH 有单实例锁，旧进程还没死透时启动新进程只会把
+ * 那个正在咽气的窗口「聚焦」一下，看起来像什么都没发生。
  */
 function restartDsh() {
   const target = dshExe || args.get('dsh-exe');
@@ -872,34 +897,42 @@ function restartDsh() {
   /* 进程名 = 镜像名去掉 .exe；用名字杀比用 PID 稳：DSH 的窗口进程、GPU 进程
      都是同一个镜像，卡死时往往是一整窝都要收掉。 */
   const image = imageNameOf(target);
-  const scriptFile = path.join(app.getPath('userData'), 'dsh-restart.ps1');
+  const helperExe = ensureRestartExe();
+  if (!helperExe) {
+    logInput('restart: 编译不出执行体（缺 .NET Framework？）');
+    return false;
+  }
+  const launcherExe = ensureRestartLauncherExe();
+  if (!launcherExe) {
+    logInput('restart: 编译不出 launcher');
+    return false;
+  }
   const logFile = path.join(app.getPath('userData'), 'restart.log');
-  const script = buildRestartScript({ exe: target, image, log: logFile });
+  const launcherArgs = buildLauncherArgs({ helperExe, image, exe: target, log: logFile });
   try {
-    fs.writeFileSync(scriptFile, script);
+    /* launcher 只是一次 WMI 调用（约 0.1 秒）。执行体不能是球的子进程：DSH 被杀时
+       球会跟着消失，球的孩子也被收掉，那就走不到「重新拉起」了。
+       launcher 本身是 winexe —— 控制台程序被 WMI 创建时会分配一个控制台窗口，
+       那正是「点了重启屏幕上闪一个黑框」的来源。 */
+    const child = spawn(launcherExe, launcherArgs, { stdio: 'ignore', windowsHide: true });
+    child.on('error', (error) => {
+      logInput('restart: 起 launcher 失败 ' + error.message);
+      app.quit();
+    });
+    /* 等 launcher 退出再退：它要先把执行体交给 WMI，中途被带走就白点了。 */
+    child.on('exit', () => app.quit());
+    /* 兜底：launcher 卡住也不能让球一直挂着 */
+    setTimeout(() => app.quit(), 20000);
   } catch (error) {
-    logInput('restart: 写脚本失败 ' + error.message);
+    logInput('restart: 起 launcher 失败 ' + error.message);
     return false;
   }
-  try {
-    const child = spawn(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptFile],
-      { detached: true, stdio: 'ignore', windowsHide: true },
-    );
-    child.unref();
-  } catch (error) {
-    logInput('restart: 起脚本失败 ' + error.message);
-    return false;
-  }
-  /* 球自己退场：DSH 一死宿主就没了，球留在桌面上只会变成孤儿窗口 */
-  setTimeout(() => app.quit(), 150);
   return true;
 }
 
 function createWindow() {
   const saved = readPosition() || defaultPosition();
-  /* 璁板繂鐨勬槸鐞冪殑宸︿笂瑙掞紱绐楀彛鍐呭姣旂悆澶т竴鐐癸紝鍏堝缓鍦ㄧ悆鐨勫師鐐癸紝鍒涘缓鍚庡啀鎸夊疄娴嬪昂瀵告崲绠椼€?*/
+  /* 记忆的是球的左上角；窗口内容比球大一点，先建在球的原点，创建后再按实测尺寸换算。 */
   const position = clampToDisplays(saved);
   win = new BrowserWindow({
     x: position.x,
@@ -907,8 +940,8 @@ function createWindow() {
     width: BALL_SIZE,
     height: BALL_SIZE,
     frame: false,
-    /* Windows 涓婇粯璁よ繕鏈変竴灞備笉鍙鐨?WS_THICKFRAME锛?px锛夛紝
-       浼氳 outer/content 灏哄鐩稿樊 4px锛屾嫋鍔ㄦ椂瓒婃嫋瓒婂ぇ銆傚叧鎺夊畠銆?*/
+    /* Windows 上默认还有一层不可见的 WS_THICKFRAME（4px），
+       会让 outer/content 尺寸相差 4px，拖动时越拖越大。关掉它。 */
     thickFrame: false,
     transparent: true,
     backgroundColor: '#00000000',
@@ -931,7 +964,7 @@ function createWindow() {
   win.setAlwaysOnTop(true, 'screen-saver');
   win.setVisibleOnAllWorkspaces(true);
 
-  /* 绐楀彛鍐呭姣旂悆澶у嚭杈圭紭锛堝疄娴?4px锛夈€傛寜瀹炴祴宸€兼妸绐楀彛寰€鍥炴尓锛?     璁╃悆姝ｅソ钀藉湪璁颁綇鐨勪綅缃笂鈥斺€斿惁鍒欐瘡娆″惎鍔ㄩ兘浼氭紓涓€鐐广€?*/
+  /* 窗口内容比球大出边缘（实测 4px）。按实测差值把窗口往回挪，让球正好落在记住的位置上——否则每次启动都会漂一点。 */
   try {
     const actual = win.getContentBounds();
     const padX = actual.width - BALL_SIZE;
@@ -945,7 +978,7 @@ function createWindow() {
       });
     }
   } catch {
-    /* 蹇界暐 */
+    /* 忽略 */
   }
 
   win.loadURL(ballUrl());
@@ -957,21 +990,21 @@ function createWindow() {
     savePosition(ballPosition());
   };
   win.once('ready-to-show', present);
-  /* 閫忔槑鏃犺竟妗嗙獥鍦ㄩ儴鍒嗙幆澧冮噷 ready-to-show 浼氳繜鍒扮敋鑷充笉瑙﹀彂锛屽厹涓€灞傚畾鏃躲€?*/
+  /* 透明无边框窗在部分环境里 ready-to-show 会迟到甚至不触发，兜一层定时。 */
   setTimeout(present, 900);
 
   win.on('closed', () => {
     win = null;
   });
 
-  /* 椤甸潰閲岀殑 JS 閿欒涔熷啓杩涜瘖鏂棩蹇楋紝鏂逛究鏃犵晫闈㈡帓鏌?*/
+  /* 页面里的 JS 错误也写进诊断日志，方便无界面排查 */
   win.webContents.on('console-message', (_event, level, message) => {
     if (level >= 2) logInput('console[' + level + '] ' + String(message).slice(0, 160));
   });
 
   win.webContents.on('did-finish-load', () => {
     lastEmotion = null;
-    /* 鎹富棰樹細閲嶈浇椤甸潰锛氭柊椤甸潰鏄敹璧风殑锛岀獥鍙ｄ篃寰楃缉鍥炵悆鐨勫昂瀵革紝鍚﹀垯浼氱暀涓€鍧楅€忔槑澶х獥 */
+    /* 换主题会重载页面：新页面是收起的，窗口也得缩回球的尺寸，否则会留一块透明大窗 */
     if (expanded) {
       const ball = ballPosition();
       expanded = false;
@@ -996,32 +1029,32 @@ function createWindow() {
   return win;
 }
 
-/* ---------------- 娓叉煋杩涚▼鍙戞潵鐨勬嫋鍔?鍔ㄤ綔 ---------------- */
+/* ---------------- 渲染进程发来的拖动动作 ---------------- */
 
 ipcMain.on('ball:drag-start', () => {
   logInput('pointerdown');
   if (!win || win.isDestroyed()) return;
   const cursor = screen.getCursorScreenPoint();
-  /* 璁?outer bounds锛氭嫋鍔ㄥ彧鐢?setPosition 鏀逛綅缃紝缁濅笉鍐欏昂瀵糕€斺€?     鍐欏昂瀵镐細鍦?DPI 缂╂斁涓嬪弽澶嶆崲绠楋紝瓒婃嫋瓒婂ぇ銆?*/
+  /* 记 outer bounds：拖动只用 setPosition 改位置，绝不写尺寸——写尺寸会在 DPI 缩放下反复换算，越拖越大。 */
   dragState = { cursor, outer: win.getBounds() };
   clearLeaveTimer();
 });
 
-/** 璇婃柇锛氭妸杈撳叆浜嬩欢鍐欏埌鏂囦欢锛屼究浜庡湪鏃犵晫闈㈢幆澧冧笅纭绐楀彛鏄惁鏀跺埌榧犳爣銆?*/
+/** 诊断：把输入事件写到文件，便于在无界面环境下确认窗口是否收到鼠标。 */
 function logInput(kind) {
-  if (!DEV_MODE) return; // 姝ｅ紡杩愯涓嶅啓璇婃柇鏂囦欢
+  if (!DEV_MODE) return; // 正式运行不写诊断文件
   try {
     const file = path.join(app.getPath('userData'), 'input.log');
     fs.appendFileSync(file, `${new Date().toISOString()} ${kind}\n`);
   } catch {
-    /* 蹇界暐 */
+    /* 忽略 */
   }
 }
 
 ipcMain.on('ball:drag-to', (_event, dx, dy) => {
   if (!win || win.isDestroyed() || !dragState) return;
-  /* 鍙敼浣嶇疆銆佷笉鏀瑰昂瀵革細setPosition 涓嶄細纰板楂橈紝灞曞紑鏃剁獥鍙ｅぇ灏忎繚鎸佷笉鍙橈紝
-     鐞冧篃灏变笉浼?璺?鍒伴潰鏉垮乏涓婅銆?*/
+  /* 只改位置、不改尺寸：setPosition 不会碰宽高，展开时窗口大小保持不变，
+     球也就不会「跳」到面板左上角。 */
   const origin = dragState.outer;
   const next = clampToDisplays(
     {
@@ -1030,7 +1063,7 @@ ipcMain.on('ball:drag-to', (_event, dx, dy) => {
     },
     targetSize,
   );
-  /* 灏哄姘歌繙鍐?targetSize 杩欎釜甯搁噺锛歴etPosition 浼氶噸濂?DWM 杈规锛?     鑰屼粠 getBounds 璇诲洖灏哄鍐嶅啓浼氬湪 DPI 缂╂斁涓嬫紓绉汇€?*/
+  /* 尺寸永远写 targetSize 这个常量：setPosition 会重算 DWM 边框，而从 getBounds 读回尺寸再写会在 DPI 缩放下漂移。 */
   const dragScale = displayScale(next.x, next.y);
   win.setContentBounds({
     x: snapToPixels(next.x, dragScale),
@@ -1053,37 +1086,22 @@ ipcMain.on('ball:restart', () => {
   restartDsh();
 });
 
-/** 鍙抽敭鑿滃崟涓庤缃€?*/
+/** 右键菜单与设置（现在只剩主题；眼神跟随和常驻加速是固定的）。 */
 ipcMain.on('ball:set-setting', (_event, key, value) => {
-  if (key === 'gaze') settings.gaze = value !== false;
-  else if (key === 'lowLatency') {
-    /* 低延迟模式：开启就预热常驻 + 不自动退出；关闭就立刻收回内存 */
-    settings.lowLatency = value === true;
-    if (settings.lowLatency) {
-      ensureToggleProc();
-      startFocusPolling();
-      touchToggleIdle();
-    } else {
-      stopToggleProc();
-    }
-  }
-  else if (key === 'theme' && (value === 'auto' || value === 'dark' || value === 'light')) {
+  if (key === 'theme' && (value === 'auto' || value === 'dark' || value === 'light')) {
     settings.theme = value;
-    /* 鍚屾椂璇锋眰鎶婃暣涓?DSH 涔熷垏杩囧幓锛氶〉闈㈠崐渚ц疆璇?/theme 鍐嶈皟 ctx.theme.setTheme */
+    /* 同时请求把整个 DSH 也切过去：页面半侧轮询 /theme 再调 ctx.theme.setTheme */
     const mapped = value === 'auto' ? 'system' : value;
     try {
       const request = require('node:http').get(ORIGIN + '/theme?set=' + mapped, (response) => response.resume());
       request.on('error', () => {});
     } catch {
-      /* 蹇界暐 */
+      /* 忽略 */
     }
     if (win && !win.isDestroyed()) win.loadURL(ballUrl());
   }
   saveSettings();
   broadcastSettings();
-  if (key === 'auto') {
-    /* 鍗犱綅锛岄伩鍏嶇┖鍒嗘敮 */
-  }
 });
 
 ipcMain.on('ball:reset-position', () => {
@@ -1104,7 +1122,7 @@ ipcMain.on('ball:reset-position', () => {
 });
 
 /**
- * DSH 鐨勪富棰樺亸濂藉彉浜嗭紙鐢ㄦ埛鍦ㄥ埆澶勬敼鐨勶級鈫?妗岄潰鐞冭窡鐫€鎹€? * DSH 鐨?'system' 瀵瑰簲鐞冪殑 'auto'锛涚浉鍚屽氨涓嶅姩锛岄伩鍏嶆潵鍥為噸杞姐€? */
+ * DSH 的主题偏好变了（用户在别处改的）→ 桌面球跟着换；'system' 对应球的 'auto'，相同就不动，避免来回重载。 */
 function syncThemeFromDsh() {
   if (!win || win.isDestroyed()) return;
   const service = require('node:http');
@@ -1127,16 +1145,16 @@ function syncThemeFromDsh() {
           broadcastSettings();
           win.loadURL(ballUrl());
         } catch {
-          /* 蹇界暐 */
+          /* 忽略 */
         }
       });
     })
     .on('error', () => {});
 }
 
-/** 鐪肩璺熼殢锛氭妸銆屽厜鏍囩浉瀵圭悆蹇冪殑鏂瑰悜銆嶅綊涓€鍖栧悗鎺ㄧ粰椤甸潰锛?0ms 涓€娆★紝澶熼『婊戜篃涓嶈垂锛夈€?*/
+/** 眼神跟随：把「光标相对球心的方向」归一化后推给页面（30ms 一次，够顺滑也不费）。 */
 function pushGaze(cursor) {
-  if (!settings.gaze || !win || win.isDestroyed()) return;
+  if (!win || win.isDestroyed()) return;
   const rects = interactiveRects();
   const ball = rects[0];
   const cx = ball.x + ball.width / 2;
@@ -1146,12 +1164,12 @@ function pushGaze(cursor) {
   try {
     win.webContents.send('ball:gaze', { x: nx, y: ny });
   } catch {
-    /* 蹇界暐 */
+    /* 忽略 */
   }
 }
 
 /**
- * 灞曞紑 / 鏀惰捣锛氱獥鍙?= 鐞?+ 闈㈡澘 鐨勫苟闆嗭紝骞朵繚璇?*鐞冪殑灞忓箷浣嶇疆涓嶅姩**銆? * 骞堕泦蹇呯劧鏈夈€岀┖鐧借钀姐€嶏紝鎵€浠ョ獥鍙ｄ笉鑳芥暣鍧楀悆榧犳爣鈥斺€? * 鐢变富杩涚▼鎸夊厜鏍囦綅缃仛鍛戒腑妫€娴嬶紝鍙湪灏忕悆/闈㈡澘涓婅В闄?setIgnoreMouseEvents銆? */
+ * 展开 / 收起：窗口 = 球 + 面板 的并集，并保证球的屏幕位置不动；窗口不能整块吃鼠标，由主进程按光标位置做命中检测，只在小球/面板上解除 setIgnoreMouseEvents。 */
 /* 悬停/按下时提前把 PowerShell 拉起来：等用户真正双击时它已经就绪，
    冷启动那 0.6-1.3 秒就藏在了"手还没点下去"的时间里。 */
 ipcMain.on('ball:warm', () => {
@@ -1184,14 +1202,14 @@ ipcMain.on('ball:expand', (_event, size) => {
   const area = screen.getDisplayNearestPoint({ x: ballLeft, y: ballTop }).workArea;
   const boxWidth = Math.max(BALL_SIZE, width);
 
-  /* 绔栫洿锛氫紭鍏堟湞涓婏紙鐞冨湪搴曪級锛屼笂闈笉澶熷氨鏈濅笅锛涗袱杈归兘涓嶅灏辫创鐫€涓婅竟 */
+  /* 竖直：优先朝上（球在底），上面不够就朝下；两边都不够就贴着上边 */
   const up = ballTop - 8 - height >= area.y;
   const downFits = ballTop + BALL_SIZE + 8 + height <= area.y + area.height;
   layout = up ? 'up' : 'down';
   let y = up ? Math.round(ballTop - 8 - height) : Math.round(ballTop);
   if (!up && !downFits) y = Math.round(Math.max(area.y, Math.min(y, area.y + area.height - BALL_SIZE)));
 
-  /* 姘村钩锛氫紭鍏堝悜鐞冨乏渚у睍寮€锛涘乏杈逛笉澶熷氨缈诲埌鍙充晶锛涢兘涓嶅灏卞す鍦ㄥ睆鍐?*/
+  /* 水平：优先向球左侧展开；左边不够就翻到右侧；都不够就夹在屏内 */
   let align = 'right';
   let x = Math.round(ballRight - boxWidth);
   if (x < area.x) {
@@ -1209,7 +1227,7 @@ ipcMain.on('ball:expand', (_event, size) => {
     try {
       win.webContents.send('ball:layout', { vertical: layout, align });
     } catch {
-      /* 蹇界暐 */
+      /* 忽略 */
     }
   }
   expanded = true;
@@ -1233,12 +1251,12 @@ ipcMain.on('ball:collapse', () => {
   if (ball) placeWindowForBall(ball, BALL_SIZE, BALL_SIZE, 'up', 'right');
 });
 
-/** 灏忕悆 / 闈㈡澘鐨勫睆骞曠煩褰紝鐢ㄤ簬鍛戒腑妫€娴嬨€?*/
+/** 小球 / 面板的屏幕矩形，用于命中检测。 */
 function interactiveRects() {
   const bounds = win.getContentBounds();
   if (!expanded) return [{ x: bounds.x, y: bounds.y, width: BALL_SIZE, height: BALL_SIZE }];
-  /* 闈㈡澘鍖哄煙鐩存帴鐢卞綋鍓嶇獥鍙ｆ帹瀵硷細绐楀彛 = 闈㈡澘 + 闂撮殭 + 鐞冿紝
-     杩欐牱涓嶄細鍥犱负 panelSize 璁扮殑鏄棫鍊艰€岃闈㈡澘椤堕儴鐐逛笉鍒般€?*/
+  /* 面板区域直接由当前窗口推导：窗口 = 面板 + 间隙 + 球，
+     这样不会因为 panelSize 记的是旧值而让面板顶部点不到。 */
   const contentHeight = Math.max(0, bounds.height - 8 - BALL_SIZE);
   return [
     {
@@ -1283,14 +1301,14 @@ function startHitTest() {
     if (ignore !== ignoringMouse) {
       ignoringMouse = ignore;
       try {
-        /* forward:true 鈥斺€?绌块€忔椂浠嶇劧鎶婄Щ鍔ㄤ簨浠惰浆缁欓〉闈紝榧犳爣杩涘埌鐞冧笂鑳界珛鍒绘仮澶?*/
+        /* forward:true —— 穿透时仍然把移动事件转给页面，鼠标进到球上能立刻恢复 */
         win.setIgnoreMouseEvents(ignore, { forward: true });
       } catch {
-        /* 蹇界暐 */
+        /* 忽略 */
       }
     }
-    /* 鍏夋爣绂诲紑鐞冨拰闈㈡澘锛氱瓑涓€灏忎細鍎垮氨鏀堕潰鏉匡紙妗岄潰绐楀彛鍚笉鍒般€屽闈㈢殑鐐瑰嚮銆嶏紝
-       鍙兘鐢ㄣ€岀寮€銆嶆潵杩戜技鐐瑰閮ㄥ叧闂級銆?*/
+    /* 光标离开球和面板：等一小会儿就收面板（桌面窗口听不到「外面的点击」，
+       只能用「离开」来近似点外部关闭）。 */
     if (expanded && !hit && !dragState) {
       if (!leaveTimer) {
         leaveTimer = setTimeout(() => {
@@ -1307,12 +1325,12 @@ function startHitTest() {
 
 ipcMain.on('ball:theme', (_event, theme) => {
   if (theme === 'dark' || theme === 'light') {
-    /* 璋冭壊鏉挎槸寮曟搸娉ㄥ唽鍓嶆敼鐨勭瀛愶紝鍙兘閲嶈浇椤甸潰锛涢噸杞藉悗 did-finish-load 浼氶噸鏂版媺鐘舵€?*/
+    /* 调色板是引擎注册前改的种子，只能重载页面；重载后 did-finish-load 会重新拉状态 */
     if (win && !win.isDestroyed()) win.loadURL(`${ORIGIN}/ball.html?surface=desktop&theme=${theme}&v=11`);
   }
 });
 
-/* ---------------- 鐢熷懡鍛ㄦ湡 ---------------- */
+/* ---------------- 生命周期 ---------------- */
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -1330,12 +1348,21 @@ if (!app.requestSingleInstanceLock()) {
     readSettings();
     createWindow();
 
-    /* 常驻加速：现在的小 exe 只占 15MB，默认就热着——双击零等待，角标判断也才有实时焦点。 */
+    /* 启动预热：编译小 exe、拉起常驻进程、开始焦点轮询——这些现在没有开关，一律执行。 */
     setTimeout(() => {
       try {
         /* 先把 exe 编出来（只需一次），免得第一次双击还要等编译 */
         ensureToggleExe();
-        if (!settings.lowLatency) return;
+        /* 重启要用的两段 exe 也预热掉：csc 大约 1 秒，别等到点了「重启 DSH」才卡这一下。 */
+        setTimeout(() => {
+          try {
+            ensureRestartExe();
+            ensureRestartLauncherExe();
+          } catch {
+            /* 编不出来就等真点的时候再试 */
+          }
+        }, 2500);
+        /* 常驻加速现在是固定行为：小 exe 只占约 3MB，一直热着，双击零等待。 */
         ensureToggleProc();
         startFocusPolling();
         touchToggleIdle();
@@ -1344,10 +1371,10 @@ if (!app.requestSingleInstanceLock()) {
       }
     }, 1500);
 
-    /* 鑷妯″紡锛氬湪椤甸潰閲屾淳鍙戠湡瀹炵殑 PointerEvent锛岃蛋涓€閬嶃€屽睍寮€ 鈫?鎷栧姩銆嶏紝
-       姣忔鎵撳嵃绐楀彛 bounds銆傛瘮澶栭儴鍚堟垚榧犳爣浜嬩欢鍙潬锛堜笉浼氭挒鍒伴潰鏉挎牸瀛愶級銆?*/
+    /* 自检模式：在页面里派发真实的 PointerEvent，走一遍「展开 → 拖动」，
+       每步打印窗口 bounds。比外部合成鼠标事件可靠（不会撞到面板格子）。 */
     if (DEV_MODE && args.get('selftest') !== undefined) {
-      /* 涓嶇敤 did-finish-load锛歝reateWindow 閲屽凡缁?loadURL锛岃繖涓簨浠跺彲鑳藉凡缁忚繃鍘讳簡 */
+      /* 不用 did-finish-load：createWindow 里已经 loadURL，这个事件可能已经过去了 */
       setTimeout(async () => {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const report = (label) => {
@@ -1406,7 +1433,7 @@ if (!app.requestSingleInstanceLock()) {
       }, 1500);
     }
 
-    /* --paneltest=1锛氬睍寮€ 鈫?鍒囥€屽叏閮ㄣ€嶁啋 鐪嬬悆鏈夋病鏈夎窇浣?*/
+    /* --paneltest=1：展开 → 切「全部」→ 看球有没有跑位 */
     /* --ctxmenutest=1：面板打开时右键，看球是否位移 */
     if (DEV_MODE && args.get('ctxmenutest') !== undefined) {
       setTimeout(async () => {
@@ -1475,7 +1502,7 @@ if (!app.requestSingleInstanceLock()) {
       }, 1800);
     }
 
-    /* --menutest=1锛氳剼鏈洿杩為〉闈紝楠岃瘉鍙抽敭鑿滃崟涓庝富棰樺垏鎹紙涓嶄緷璧栧悎鎴愰紶鏍囷級 */
+    /* --menutest=1：脚本直连页面，验证右键菜单与主题切换（不依赖合成鼠标） */
     if (DEV_MODE && args.get('menutest') !== undefined) {
       setTimeout(async () => {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1487,7 +1514,7 @@ if (!app.requestSingleInstanceLock()) {
         await sleep(600);
         const before = box('collapsed');
         await win.webContents.executeJavaScript('window.__EB_OPEN_MENU()', true);
-        /* 鍙瓑 250ms锛氭闈㈢悆鏈夈€屽厜鏍囩寮€ 500ms 灏辨敹璧枫€嶇殑鍚彂寮忥紝鍚堟垚娴嬭瘯閲屽厜鏍囦笉鍦ㄧ悆涓?*/
+        /* 只等 250ms：桌面球有「光标离开 500ms 就收起」的启发式，合成测试里光标不在球上 */
         await sleep(250);
         const opened = box('menu-open');
         const marks = await win.webContents.executeJavaScript(
@@ -1530,7 +1557,7 @@ if (!app.requestSingleInstanceLock()) {
     });
 
     if (probePath) {
-      /* 鑷妯″紡锛氭墦鍗拌瘖鏂紙鍙€夋埅鍥撅級锛岀劧鍚庨€€鍑恒€傜粰涓嶅甫鐣岄潰鐨勭幆澧冮獙璇佺敤銆?*/
+      /* 自检模式：打印诊断（可选截图），然后退出。给不带界面的环境验证用。 */
       setTimeout(() => {
         console.log(JSON.stringify({ probe: 'timeout' }));
         app.exit(2);
@@ -1539,8 +1566,8 @@ if (!app.requestSingleInstanceLock()) {
         await new Promise((resolve) => setTimeout(resolve, 1500));
         const state = await fetchState();
         if (state) await applyEmotion(state.emotion);
-        /* --badge=done|error锛氭妸瑙掓爣鐐逛寒锛屼究浜庢埅鍥剧‘璁ゆ覆鏌?*/
-        /* --badgeipc=done锛氳蛋鐪熷疄鐨?ball:badge IPC锛堥獙璇?preload 鈫?椤甸潰杩欐潯璺級 */
+        /* --badge=done|error：把角标点亮，便于截图确认渲染 */
+        /* --badgeipc=done：走真实的 ball:badge IPC（验证 preload → 页面这条路） */
         if (args.get('badgeipc')) {
           sendBadge({ kind: args.get('badgeipc'), text: badgeText(args.get('badgeipc')) });
           console.log('badgeipc sent');
